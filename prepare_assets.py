@@ -53,7 +53,7 @@ from pathlib import Path
 # ==========================================
 # SETTINGS  (edit only this line per video)
 # ==========================================
-PROJECT_DIR = "G:/A Steady/Anti-vids/game 4"
+PROJECT_DIR = "G:/A Steady/Anti-vids/game 5"
 # ==========================================
 
 # ── Clip extraction ────────────────────────────────────────────────────────────
