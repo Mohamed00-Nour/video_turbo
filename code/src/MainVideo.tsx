@@ -32,6 +32,7 @@ export const MainVideo: React.FC = () => {
                 <HookBlock
                   durationFrames={block.durationFrames}
                   gtaOffset={block.gtaOffset}
+                  bgDurationFrames={block.bgDurationFrames}
                 />
               </Series.Sequence>
             );
@@ -44,10 +45,13 @@ export const MainVideo: React.FC = () => {
                 <GameBlock
                   durationFrames={block.durationFrames}
                   gtaOffset={block.gtaOffset}
+                  bgDurationFrames={block.bgDurationFrames}
                   bgVideo={block.bgVideo}
                   folder={block.folder}
                   title={block.title}
                   topClip={block.topClip}
+                  topDurationFrames={block.topDurationFrames}
+                  bottomDurationFrames={block.bottomDurationFrames}
                   bottomClip={block.bottomClip}
                   logo={block.logo}
                   hasLogo={block.hasLogo}
@@ -66,6 +70,7 @@ export const MainVideo: React.FC = () => {
                 <CtaBlock
                   durationFrames={block.durationFrames}
                   gtaOffset={block.gtaOffset}
+                  bgDurationFrames={block.bgDurationFrames}
                   bgVideo={block.bgVideo}
                 />
               </Series.Sequence>

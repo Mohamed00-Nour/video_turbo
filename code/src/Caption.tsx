@@ -31,7 +31,9 @@ export const Caption: React.FC<CaptionProps> = ({ currentFrame }) => {
 
   if (!currentBlock) return null;
 
-  // Captions are shown for the whole video (hook, game blocks and CTA).
+  if (currentBlock.type === "game" && timelineData.captionsInGameBlocks === false) {
+    return null;
+  }
 
   // Find the word that is currently active
   let activeWord: WordData | null = null;
@@ -63,8 +65,8 @@ export const Caption: React.FC<CaptionProps> = ({ currentFrame }) => {
   // Vertical position based on block type
   // Hook at ~46% height = 883px. CTA at ~72% height = 1382px.
   // Game blocks: just under the logo (logo is centered at ~970px), above the bottom clip.
-  const yCenter =
-    currentBlock.type === "hook" ? 883 : currentBlock.type === "game" ? 1205 : 1382;
+  const fallbackY = currentBlock.type === "hook" ? 883 : currentBlock.type === "game" ? 1205 : 1382;
+  const yCenter = typeof currentBlock.captionY === "number" ? currentBlock.captionY * 1920 : fallbackY;
 
   return (
     <div
@@ -103,7 +105,6 @@ export const Caption: React.FC<CaptionProps> = ({ currentFrame }) => {
           style={{
             transform: `scale(${scale})`,
             transformOrigin: `540px ${yCenter}px`,
-            transition: "transform 0.05s ease-out",
           }}
         >
           <text

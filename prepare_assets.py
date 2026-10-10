@@ -4,7 +4,7 @@ prepare_assets.py — Auto-download game assets before running build_video.py
 
 USAGE
 -----
-1.  Set PROJECT_DIR below to your project folder (same as in build_video.py).
+1.  Pass --project to both scripts, or set their PROJECT_DIR defaults.
 
 2.  Create  <PROJECT_DIR>/games.txt  with one line per game:
         01_DDLC          | https://www.youtube.com/watch?v=XXXXXXX
@@ -20,19 +20,23 @@ USAGE
     Register a free app at https://api-docs.igdb.com/#getting-started
 
 4.  Run:
-        python prepare_assets.py
+        python prepare_assets.py --project "path/to/project"
 
 5.  Then run your normal:
-        python build_video.py
+        python build_video.py --project "path/to/project"
 
 WHAT IT DOES PER GAME
 ---------------------
   ✅  Creates  games/<folder>/
-  ✅  Downloads the YouTube video with yt-dlp  (best quality ≤ 1080p)
-  ✅  Reads words.json / script.txt to estimate each game's clip duration
-  ✅  Cuts  top.mp4    from ~25% into the downloaded video
-  ✅  Cuts  bottom.mp4 from ~60% into the downloaded video  (different section)
+  ✅  Downloads only the two needed sections (video only, best quality ≤ 1080p)
+  ✅  Reads words.json to estimate each game's clip duration
+  ✅  Cuts  top.mp4    from ~25% into the source video
+  ✅  Cuts  bottom.mp4 from ~60% into the source video  (different section)
   ✅  Downloads logo from IGDB  → logo.png  (falls back gracefully if API not set)
+
+Existing clips are checked before any network access. New clips are cached in
+output/gameplay_cache beside this script, so other projects can reuse them.
+Existing raw_gameplay files are reused locally; new full videos are not downloaded.
 
 REQUIREMENTS
 ------------
@@ -41,19 +45,25 @@ REQUIREMENTS
 """
 
 from __future__ import annotations
+import hashlib
 import json
+import argparse
+import math
 import os
 import re
 import subprocess
 import sys
 import shutil
+import tempfile
 import urllib.request
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+from pipeline_common import file_signature, fingerprint, read_cache, write_json, voiceover_path, plan_game_timing
 
 # ==========================================
 # SETTINGS  (edit only this line per video)
 # ==========================================
-PROJECT_DIR = "G:/A Steady/Anti-vids/game 5"
+PROJECT_DIR = "G:/A Steady/Anti-vids/game 6"
 # ==========================================
 
 # ── Clip extraction ────────────────────────────────────────────────────────────
@@ -63,12 +73,8 @@ PROJECT_DIR = "G:/A Steady/Anti-vids/game 5"
 TOP_POSITION_RATIO    = 0.25   # 25 % into the video
 BOTTOM_POSITION_RATIO = 0.60   # 60 % into the video
 
-# Fallback clip duration (seconds) when we cannot read game timing from words.json
+# Fallback duration when no voiceover is available yet
 DEFAULT_CLIP_DURATION = 20.0
-
-# Minimum / maximum clip duration we ever produce
-MIN_CLIP_DURATION = 4.0
-MAX_CLIP_DURATION = 60.0
 
 # ── IGDB ───────────────────────────────────────────────────────────────────────
 IGDB_CLIENT_ID     = os.environ.get("IGDB_CLIENT_ID", "")
@@ -80,6 +86,10 @@ ENGINE_DIR   = Path(__file__).resolve().parent
 GAMES_DIR    = PROJECT_PATH / "games"
 GAMES_TXT    = PROJECT_PATH / "games.txt"
 OUTPUT_DIR   = PROJECT_PATH / "output"
+# Shared by all projects using this script; generated media stays out of Git.
+GAMEPLAY_CACHE_DIR = ENGINE_DIR / "output" / "gameplay_cache"
+VIDEO_FORMAT = "bestvideo[height<=1080][ext=mp4]/bestvideo[height<=1080]"
+CLIP_CACHE_VERSION = 1
 
 # Ensure Python / ffmpeg are on PATH (mirrors build_video.py)
 ADDITIONAL_PATHS = [
@@ -91,6 +101,14 @@ for _p in ADDITIONAL_PATHS:
     if _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + ";" + os.environ.get("PATH", "")
 os.environ["PYTHONIOENCODING"] = "utf-8"
+
+
+def configure_project(project: Path) -> None:
+    global PROJECT_PATH, GAMES_DIR, GAMES_TXT, OUTPUT_DIR
+    PROJECT_PATH = Path(project).resolve()
+    GAMES_DIR = PROJECT_PATH / "games"
+    GAMES_TXT = PROJECT_PATH / "games.txt"
+    OUTPUT_DIR = PROJECT_PATH / "output"
 
 
 def log(msg: str) -> None:
@@ -125,6 +143,11 @@ def parse_games_txt() -> list[dict]:
         url    = url_raw.strip()
         # Derive a clean game name from the folder (e.g. "01_Sven_Co-op" → "Sven Co-op")
         game_name = re.sub(r"^\d+[_\-\s]+", "", folder).replace("-", " ").replace("_", " ").strip()
+        if not folder or not url:
+            raise ValueError("Each games.txt line needs a folder and a URL.")
+        path = (GAMES_DIR / folder).resolve()
+        if not path.is_relative_to(GAMES_DIR.resolve()):
+            raise ValueError(f"Game folder must be inside games/: {folder}")
         games.append({"folder": folder, "url": url, "game_name": game_name})
 
     if not games:
@@ -139,65 +162,27 @@ def parse_games_txt() -> list[dict]:
 # Clip duration estimation from existing transcription / words.json
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _load_words_json() -> list[dict] | None:
-    words_file = OUTPUT_DIR / "words.json"
-    aligned    = OUTPUT_DIR / "words_aligned.json"
-    target = aligned if aligned.exists() else words_file
-    if not target.exists():
-        return None
-    with open(target, encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get("words", [])
-
-
 def estimate_game_durations(games: list[dict]) -> list[float]:
-    """
-    Try to read words.json to estimate how long each game's block is.
-    Falls back to DEFAULT_CLIP_DURATION if the file is not available yet.
-    """
-    words = _load_words_json()
-    if not words:
-        log("words.json not found — using default clip duration for all games.")
+    """Use exactly the builder's timing, transcribing once if voiceover is ready."""
+    config = load_config()
+    try:
+        voice = voiceover_path(PROJECT_PATH)
+    except FileNotFoundError:
+        log("Voiceover not available yet; using default clip duration. Rerun after adding it.")
         return [DEFAULT_CLIP_DURATION] * len(games)
-
-    total_duration = words[-1]["end"] if words else 0.0
-
-    # Try to find each game's mention in the transcript to get timing
-    game_start_times: list[float | None] = []
-    for g in games:
-        keywords = g["game_name"].lower().split()
-        found = None
-        for w in words:
-            w_lc = w["word"].lower()
-            if any(k in w_lc or w_lc in k for k in keywords if len(k) > 2):
-                found = w["start"]
-                break
-        game_start_times.append(found)
-
-    # Build durations from start → next start (or end of voiceover)
-    hook_end    = 3.5
-    cta_seconds = 5.0
-    cta_start   = total_duration - cta_seconds
-
-    durations = []
-    prev_end = hook_end
-    for i, st in enumerate(game_start_times):
-        if st is None or st < prev_end:
-            # Distribute remaining time evenly
-            remaining = max(1.0, cta_start - prev_end)
-            dur = remaining / (len(games) - i)
-        else:
-            next_st = next((t for t in game_start_times[i + 1:] if t is not None), cta_start)
-            dur = next_st - st
-
-        dur = max(MIN_CLIP_DURATION, min(MAX_CLIP_DURATION, dur))
-        durations.append(round(dur, 2))
-        prev_end = (st or prev_end) + dur
-
-    log("Estimated clip durations (seconds):")
-    for g, d in zip(games, durations):
-        log(f"  {g['folder']}: {d:.1f}s")
-    return durations
+    import build_video as builder
+    builder.configure_project(PROJECT_PATH)
+    duration = builder.get_audio_duration(voice)
+    transcription = builder.transcribe_voiceover(voice)
+    transcription = builder.apply_script(transcription, duration)
+    specs = config.get("games") or [{**game, "title": game["game_name"],
+                                     "spoken_names": [game["game_name"]]} for game in games]
+    plan = plan_game_timing(specs, transcription["words"], duration, config)
+    durations = {spec["folder"]: (end - start) / plan["fps"]
+                 for spec, (start, end) in zip(specs, plan["gameRanges"])}
+    if any(game["folder"] not in durations for game in games):
+        raise ValueError("games.txt contains a folder missing from config.json games. Align the game lists.")
+    return [durations[game["folder"]] for game in games]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -219,116 +204,213 @@ def get_video_duration(path: Path) -> float:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# yt-dlp — download YouTube video
+# Gameplay sections and shared cache
 # ──────────────────────────────────────────────────────────────────────────────
 
-def download_youtube(url: str, dest_dir: Path) -> Path | None:
-    """
-    Download the best quality video (≤1080p) to dest_dir.
-    Returns the path of the downloaded file, or None on failure.
-    """
-    try:
-        import yt_dlp  # noqa: F401
-    except ImportError:
-        log("ERROR: yt-dlp is not installed. Run:  pip install yt-dlp")
-        sys.exit(1)
-
-    out_template = str(dest_dir / "raw_gameplay.%(ext)s")
-    cmd = [
-        sys.executable, "-m", "yt_dlp",
-        "--format", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
-        "--merge-output-format", "mp4",
-        "--output", out_template,
-        "--no-playlist",
-        "--quiet", "--progress",
-        url
-    ]
-    log(f"  Downloading: {url}")
-    result = subprocess.run(cmd, cwd=str(dest_dir))
-    if result.returncode != 0:
-        log("  WARNING: yt-dlp reported an error. Trying generic fallback format...")
-        cmd_fallback = [
-            sys.executable, "-m", "yt_dlp",
-            "--format", "best[ext=mp4]/best",
-            "--output", out_template,
-            "--no-playlist",
-            "--quiet", "--progress",
-            url
-        ]
-        result = subprocess.run(cmd_fallback, cwd=str(dest_dir))
-        if result.returncode != 0:
-            log("  ERROR: Download failed. Check the URL and your internet connection.")
-            return None
-
-    # Find the downloaded file
-    candidates = list(dest_dir.glob("raw_gameplay.*"))
-    if not candidates:
-        log("  ERROR: Download completed but file not found.")
-        return None
-    return candidates[0]
+def clip_is_ready(path: Path, duration: float | None = None) -> bool:
+    """Reject empty/broken files and incomplete cached downloads."""
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    actual = get_video_duration(path)
+    if not math.isfinite(actual) or actual <= 0:
+        return False
+    return duration is None or abs(actual - duration) <= 0.25
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# ffmpeg — cut a clip
-# ──────────────────────────────────────────────────────────────────────────────
+def source_cache_key(url: str) -> str:
+    """Equivalent YouTube links share a cache; other sources use their full URL."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    video_id = None
+    if host in {"youtu.be", "www.youtu.be"}:
+        video_id = parsed.path.strip("/").split("/")[0]
+    elif host in {"youtube.com", "www.youtube.com", "m.youtube.com"}:
+        video_id = parse_qs(parsed.query).get("v", [None])[0]
+        parts = parsed.path.strip("/").split("/")
+        if not video_id and len(parts) >= 2 and parts[0] in {"shorts", "embed", "live"}:
+            video_id = parts[1]
+    identity = f"youtube:{video_id}" if video_id else url
+    return hashlib.sha256(identity.encode()).hexdigest()[:24]
+
+
+def clip_cache_path(source_key: str, start: float, duration: float) -> Path:
+    settings = [CLIP_CACHE_VERSION, VIDEO_FORMAT, source_key,
+                round(float(start), 3), round(float(duration), 3), "h264-crf23-fast-noaudio"]
+    digest = hashlib.sha256(json.dumps(settings).encode()).hexdigest()[:24]
+    return GAMEPLAY_CACHE_DIR / f"{digest}.mp4"
+
+
+def clip_ranges(video_duration: float, requested: float) -> tuple[float, float, float]:
+    """Keep the usual 25% / 60% positions, bounding short videos at EOF."""
+    if not math.isfinite(video_duration) or video_duration <= 0:
+        raise ValueError("Source video has no usable duration (live streams are unsupported).")
+    if not math.isfinite(requested) or requested <= 0:
+        raise ValueError("Clip duration must be positive.")
+    duration = round(min(requested, video_duration), 3)
+    latest_start = max(0.0, video_duration - duration)
+    safe_start = max(0.0, video_duration * 0.85 - duration)
+    top = max(0.0, min(video_duration * TOP_POSITION_RATIO, safe_start))
+    bottom = min(latest_start, max(top + duration + 1.0,
+                                  min(video_duration * BOTTOM_POSITION_RATIO, safe_start)))
+    return round(top, 3), round(bottom, 3), duration
+
+
+def fetch_video_info(url: str) -> dict:
+    import yt_dlp
+    # Metadata only: no video or audio is downloaded here.
+    with yt_dlp.YoutubeDL({"format": VIDEO_FORMAT, "noplaylist": True,
+                          "quiet": True, "socket_timeout": 30}) as ydl:
+        info = ydl.extract_info(url, download=False)
+    if not info or info.get("is_live") or not info.get("duration"):
+        raise ValueError("Use an uploaded gameplay video with a known duration, not a live stream.")
+    clip_ranges(float(info["duration"]), DEFAULT_CLIP_DURATION)
+    return info
+
+
+def copy_clip(src: Path, dest: Path) -> None:
+    """Publish only complete files; an interrupted copy cannot become a cache hit."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".clip-", dir=dest.parent) as work:
+        pending = Path(work) / "clip.mp4"
+        shutil.copyfile(src, pending)
+        pending.replace(dest)
+
 
 def cut_clip(src: Path, start_sec: float, duration: float, dest: Path) -> bool:
-    """Cut a clip from src starting at start_sec with given duration into dest."""
-    cmd = [
-        "ffmpeg", "-y",
-        "-ss", str(round(start_sec, 3)),
-        "-i", str(src),
-        "-t",  str(round(duration, 3)),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k",
-        "-movflags", "+faststart",
-        str(dest)
-    ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        log(f"  WARNING: ffmpeg error cutting {dest.name}")
-        if res.stderr:
-            log(f"  {res.stderr[-300:]}")
-        return False
+    """Precisely cut an existing local video, encoding only the requested section."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".clip-", dir=dest.parent) as work:
+        pending = Path(work) / "clip.mp4"
+        cmd = [
+            "ffmpeg", "-nostdin", "-y", "-ss", str(start_sec), "-i", str(src),
+            "-t", str(duration), "-map", "0:v:0", "-an",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(pending),
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0 or not clip_is_ready(pending, duration):
+            log(f"  WARNING: ffmpeg could not cut {dest.name}")
+            if res.stderr:
+                log(f"  {res.stderr[-300:]}")
+            return False
+        pending.replace(dest)
     return True
 
 
-def extract_clips(raw_video: Path, clip_duration: float, game_dir: Path) -> tuple[bool, bool]:
-    """
-    Extract top.mp4 and bottom.mp4 from two different sections of raw_video.
-    Returns (top_ok, bottom_ok).
-    """
-    vid_len = get_video_duration(raw_video)
-    if vid_len < 10:
-        log(f"  WARNING: video is very short ({vid_len:.1f}s), clips may be truncated.")
+def download_youtube(info: dict, start: float, duration: float, dest: Path) -> bool:
+    """yt-dlp/FFmpeg seek into the remote video and download just one section."""
+    import copy
+    import yt_dlp
+    from yt_dlp.utils import download_range_func
 
-    safe_len = vid_len * 0.85  # avoid last 15 % (outros/end screens)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".download-", dir=dest.parent) as work:
+        pending = Path(work) / "clip.mp4"
+        options = {
+            "format": VIDEO_FORMAT,
+            "outtmpl": str(pending),
+            "noplaylist": True,
+            "quiet": True,
+            "socket_timeout": 30,
+            "download_ranges": download_range_func(None, [(start, start + duration)]),
+            # Re-encode this small section once for accurate, playable H.264 cuts.
+            "force_keyframes_at_cuts": True,
+            "external_downloader_args": {"ffmpeg_o": [
+                "-t", str(duration), "-map", "0:v:0", "-an",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-f", "mp4",
+            ]},
+            "fixup": "never",
+        }
+        with yt_dlp.YoutubeDL(options) as ydl:
+            # Reuse freshly resolved stream URLs for both clips; do not extract twice.
+            ydl.process_ie_result(copy.deepcopy(info), download=True)
+        if not clip_is_ready(pending, duration):
+            log("  WARNING: section download is incomplete; it will not be cached.")
+            return False
+        pending.replace(dest)
+    return True
 
-    # top.mp4: from TOP_POSITION_RATIO into the safe zone
-    top_start = vid_len * TOP_POSITION_RATIO
-    top_start = max(0.0, min(top_start, safe_len - clip_duration))
 
-    # bottom.mp4: from BOTTOM_POSITION_RATIO into the safe zone
-    bottom_start = vid_len * BOTTOM_POSITION_RATIO
-    bottom_start = max(top_start + clip_duration + 1.0,  # must start after top ends
-                       min(bottom_start, safe_len - clip_duration))
+def prepare_gameplay(url: str, clip_duration: float, game_dir: Path) -> bool:
+    """Reuse finished clips/cache/local footage before requesting remote sections."""
+    game_dir.mkdir(parents=True, exist_ok=True)
+    paths = [game_dir / "top.mp4", game_dir / "bottom.mp4"]
+    source_key = source_cache_key(url)
+    request = fingerprint({"source": source_key, "duration": float(clip_duration),
+                           "top": TOP_POSITION_RATIO, "bottom": BOTTOM_POSITION_RATIO,
+                           "format": VIDEO_FORMAT, "version": CLIP_CACHE_VERSION})
+    manifest_path = game_dir / ".gameplay_manifest.json"
+    manifest = read_cache(manifest_path)
+    records = manifest.get("clips", {})
+    ready = []
+    for path in paths:
+        valid = clip_is_ready(path)
+        record = records.get(path.name, {})
+        generated = valid and record.get("output") == file_signature(path)
+        ready.append(valid and (not generated or record.get("request") == request))
+        if valid and record and not generated:
+            records.pop(path.name, None)  # A user replaced this generated clip.
+    if all(ready):
+        log("  top.mp4 and bottom.mp4 are ready; skipping gameplay download.")
+        return True
 
-    log(f"  Video length: {vid_len:.1f}s")
-    log(f"  top.mp4    : {top_start:.1f}s → {top_start + clip_duration:.1f}s ({clip_duration:.1f}s)")
-    log(f"  bottom.mp4 : {bottom_start:.1f}s → {bottom_start + clip_duration:.1f}s ({clip_duration:.1f}s)")
+    GAMEPLAY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    metadata_path = GAMEPLAY_CACHE_DIR / f"{source_key}.json"
+    raw_video = next((p for p in sorted(game_dir.glob("raw_gameplay.*"))
+                      if p.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}
+                      and clip_is_ready(p)), None)
+    if raw_video and manifest.get("rawSource", manifest.get("source")) not in (None, source_key):
+        log("  URL changed; old raw_gameplay footage will not be reused.")
+        raw_video = None
+    info = None
+    try:
+        if raw_video:
+            log(f"  Reusing local footage: {raw_video.name}")
+            video_duration = get_video_duration(raw_video)
+            manifest["rawSource"] = source_key
+        else:
+            try:
+                video_duration = float(json.loads(metadata_path.read_text(encoding="utf-8"))["duration"])
+                clip_ranges(video_duration, clip_duration)
+            except (OSError, ValueError, KeyError, TypeError):
+                log("  Reading YouTube video duration (metadata only)...")
+                info = fetch_video_info(url)
+                video_duration = float(info["duration"])
+                write_json(metadata_path, {"duration": video_duration})
 
-    top_path    = game_dir / "top.mp4"
-    bottom_path = game_dir / "bottom.mp4"
+        top, bottom, duration = clip_ranges(video_duration, clip_duration)
+        log(f"  Video length: {video_duration:.1f}s; clip duration: {duration:.1f}s")
+        for i, (dest, start) in enumerate(zip(paths, [top, bottom])):
+            if ready[i]:
+                log(f"  {dest.name} already exists, keeping it.")
+                continue
+            cached = clip_cache_path(source_key, start, duration)
+            if clip_is_ready(cached, duration):
+                log(f"  Reusing cached {dest.name} ({start:.1f}s - {start + duration:.1f}s).")
+            elif raw_video:
+                if not cut_clip(raw_video, start, duration, cached):
+                    continue
+            else:
+                if info is None:
+                    info = fetch_video_info(url)
+                log(f"  Downloading {dest.name} only: {start:.1f}s - {start + duration:.1f}s (no audio).")
+                if not download_youtube(info, start, duration, cached):
+                    continue
+            copy_clip(cached, dest)
+            records[dest.name] = {"request": request, "output": file_signature(dest)}
+            manifest["source"] = source_key
+            manifest["clips"] = records
+            write_json(manifest_path, manifest)
+            ready[i] = True
+    except ImportError:
+        log("  ERROR: yt-dlp is not installed. Run: pip install yt-dlp")
+    except Exception as e:
+        log(f"  ERROR: gameplay preparation failed: {e}")
+    return all(ready)
 
-    top_ok    = cut_clip(raw_video, top_start,    clip_duration, top_path)
-    bottom_ok = cut_clip(raw_video, bottom_start, clip_duration, bottom_path)
 
-    return top_ok, bottom_ok
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 # IGDB logo download
-# ──────────────────────────────────────────────────────────────────────────────
 
 def _igdb_token(client_id: str, client_secret: str) -> str | None:
     url  = f"https://id.twitch.tv/oauth2/token?client_id={client_id}&client_secret={client_secret}&grant_type=client_credentials"
@@ -426,7 +508,8 @@ def load_config() -> dict:
     return {}
 
 
-def main() -> None:
+def run_preparation() -> int:
+    failures = 0
     log(f"Starting asset preparation for: {PROJECT_PATH}")
     config  = load_config()
     games   = parse_games_txt()
@@ -454,30 +537,12 @@ def main() -> None:
 
         game_dir.mkdir(parents=True, exist_ok=True)
 
-        # ── 1. Download YouTube video ──────────────────────────────────────
-        raw_video = next(iter(sorted(game_dir.glob("raw_gameplay.*"))), None)
-        if raw_video and raw_video.exists():
-            log(f"  raw_gameplay already exists ({raw_video.name}), skipping download.")
-        else:
-            raw_video = download_youtube(url, game_dir)
-            if raw_video is None:
-                log(f"  SKIPPING {folder} — download failed.")
-                continue
+        # Check completed clips first, then cache / local footage / remote sections.
+        if not prepare_gameplay(url, clip_dur, game_dir):
+            failures += 1
+            log(f"  WARNING: gameplay clips are incomplete for {folder}. Retry after resolving the error.")
 
-        # ── 2. Extract top.mp4 and bottom.mp4 ─────────────────────────────
-        top_exists    = (game_dir / "top.mp4").exists()
-        bottom_exists = (game_dir / "bottom.mp4").exists()
-
-        if top_exists and bottom_exists:
-            log("  top.mp4 and bottom.mp4 already exist, skipping clip extraction.")
-        else:
-            top_ok, bottom_ok = extract_clips(raw_video, clip_dur, game_dir)
-            if not top_ok:
-                log(f"  WARNING: top.mp4 could not be created for {folder}")
-            if not bottom_ok:
-                log(f"  WARNING: bottom.mp4 could not be created for {folder}")
-
-        # ── 3. Download logo from IGDB ─────────────────────────────────────
+        # Download logo from IGDB.
         logo_dest = game_dir / "logo.png"
         webp_dest = game_dir / "logo.webp"
         if logo_dest.exists() or webp_dest.exists():
@@ -490,10 +555,24 @@ def main() -> None:
             log("  Logo skipped (no IGDB credentials).")
 
     log("=" * 60)
-    log("Asset preparation complete!")
-    log("You can now run:  python build_video.py")
-    log("=" * 60)
+    if failures:
+        log(f"Asset preparation incomplete: {failures} game(s) failed. Fix the errors and retry.")
+        return 1
+    log("Asset preparation complete! Run python build_video.py with the same --project.")
+    return 0
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Prepare gameplay clips and logos.")
+    parser.add_argument("--project", type=Path, default=PROJECT_PATH, help="Video project folder")
+    args = parser.parse_args(argv)
+    configure_project(args.project)
+    try:
+        return run_preparation()
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
+        log(f"ERROR: {error}")
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

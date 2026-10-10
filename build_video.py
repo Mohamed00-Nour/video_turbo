@@ -1,7 +1,7 @@
 """
 Autonomous Video Generation Script for TikTok Reels
-Reads PROJECT_DIR from a single variable at the top.
-Can be re-run for any new video by changing only PROJECT_DIR.
+Pass --project to select a video folder, or keep the PROJECT_DIR default.
+Cached stages are reused only when their inputs are unchanged.
 """
 
 from pathlib import Path
@@ -13,11 +13,15 @@ import shutil
 import difflib
 import subprocess
 import urllib.request
+import argparse
+import math
+from pipeline_common import (file_digest, file_signature, fingerprint, read_cache,
+                             write_json, voiceover_path, plan_game_timing)
 
 # ==========================================
 # SETTINGS (edit only this line per video)
 # ==========================================
-PROJECT_DIR = "G:/A Steady/Anti-vids/game 5"
+PROJECT_DIR = "G:/A Steady/Anti-vids/game 6"
 # ==========================================
 
 # ------------------------------------------
@@ -67,6 +71,16 @@ for p in ADDITIONAL_PATHS:
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
 
+def configure_project(project: Path) -> None:
+    global PROJECT_PATH, OUTPUT_DIR, CODE_DIR, PUBLIC_DIR, FONTS_DIR, GAMES_DIR
+    PROJECT_PATH = Path(project).resolve()
+    OUTPUT_DIR = PROJECT_PATH / "output"
+    CODE_DIR = PROJECT_PATH / "code" if (PROJECT_PATH / "code").is_dir() else ENGINE_DIR / "code"
+    PUBLIC_DIR = CODE_DIR / "public"
+    FONTS_DIR = PROJECT_PATH / "fonts" if (PROJECT_PATH / "fonts").is_dir() else ENGINE_DIR / "fonts"
+    GAMES_DIR = PROJECT_PATH / "games"
+
+
 def log(msg: str):
     print(f"[BUILD_VIDEO] {msg}", flush=True)
 
@@ -84,17 +98,8 @@ def check_required_files():
             log(f"Expected location: {gta_bg}")
             sys.exit(1)
 
-    # 2. Voiceover audio
-    vo = PROJECT_PATH / "voiceover.mp3"
-    if not vo.exists():
-        vo_space = PROJECT_PATH / "voice over.mp3"
-        if vo_space.exists():
-            shutil.copy(vo_space, vo)
-            log("Found 'voice over.mp3' and copied to 'voiceover.mp3'")
-        else:
-            log(f"ERROR: Required file missing: voiceover.mp3")
-            log(f"Expected location: {vo}")
-            sys.exit(1)
+    # Accept MP3, WAV and other FFmpeg-supported voiceover formats.
+    voiceover_path(PROJECT_PATH)
 
     # 3. Games directory
     if not GAMES_DIR.exists() or not any(GAMES_DIR.iterdir()):
@@ -207,25 +212,27 @@ def apply_corrections(result: dict, config: dict) -> bool:
     return changed
 
 
-def transcribe_voiceover(audio_path: Path) -> dict:
+def transcribe_voiceover(audio_path: Path, force: bool = False) -> dict:
     words_file = OUTPUT_DIR / "words.json"
     config = load_config()
 
-    if words_file.exists():
-        log("Existing words.json found. Reading transcription...")
-        with open(words_file, "r", encoding="utf-8") as f:
-            result = json.load(f)
-        # Fix cached transcripts too, so you don't have to re-transcribe
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    model_name = config.get("whisper_model", "large-v3")
+    cache_key = fingerprint({"version": 1, "audio": file_digest(audio_path),
+                             "model": model_name, "language": "ar",
+                             "vocabulary": config.get("vocabulary", []),
+                             "corrections": config.get("corrections", {}),
+                             "defaults": [DEFAULT_VOCABULARY, DEFAULT_CORRECTIONS]})
+    result = read_cache(words_file)
+    if not force and result.get("cacheKey") == cache_key and isinstance(result.get("words"), list):
+        log("Voiceover unchanged; reusing cached transcription.")
         if apply_corrections(result, config):
-            with open(words_file, "w", encoding="utf-8") as f:
-                json.dump(result, f, ensure_ascii=False, indent=2)
-            log("words.json updated with corrected words.")
+            write_json(words_file, result)
         return result
 
-    log("Transcribing voiceover with faster-whisper (model 'large-v3', language 'ar')...")
+    log(f"Transcribing voiceover with faster-whisper (model '{model_name}', language 'ar')...")
     from faster_whisper import WhisperModel
-
-    model = WhisperModel("large-v3", device="cpu", compute_type="int8")
+    model = WhisperModel(model_name, device="cpu", compute_type="int8")
 
     vocab = list(DEFAULT_VOCABULARY) + list(config.get("vocabulary", []))
     # words from script.txt help Whisper hear the right words in the first place
@@ -264,13 +271,13 @@ def transcribe_voiceover(audio_path: Path) -> dict:
             })
 
     result = {
+        "cacheKey": cache_key,
         "transcript": " ".join(full_transcript),
         "words": words_data
     }
     apply_corrections(result, config)
 
-    with open(words_file, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+    write_json(words_file, result)
 
     log(f"Transcription complete: {len(words_data)} words.")
     log(f"Transcript: {result['transcript']}")
@@ -466,31 +473,135 @@ def align_script_to_words(script_tokens: list, whisper_words: list, vo_duration:
 
 
 def _finalize_aligned(words: list, vo_duration: float) -> list:
-    """Keep word start times strictly increasing (at least one frame apart)."""
-    prev_start = None
-    for w in words:
-        if prev_start is not None and w["start"] < prev_start + _MIN_WORD_SECONDS:
-            w["start"] = prev_start + _MIN_WORD_SECONDS
-        if w["end"] < w["start"] + _MIN_WORD_SECONDS:
-            w["end"] = w["start"] + _MIN_WORD_SECONDS
-        prev_start = w["start"]
-        w["start"] = round(w["start"], 3)
-        w["end"] = round(w["end"], 3)
+    """Keep captions ordered and bounded; reject scripts that cannot fit."""
+    if len(words) * _MIN_WORD_SECONDS > vo_duration + .001:
+        raise ValueError("Too many script words for the voiceover duration. Check script.txt.")
+    previous = -_MIN_WORD_SECONDS
+    for i, word in enumerate(words):
+        latest = vo_duration - (len(words) - i) * _MIN_WORD_SECONDS
+        start = max(previous + _MIN_WORD_SECONDS, min(max(0., word["start"]), latest))
+        end = min(vo_duration, max(start + _MIN_WORD_SECONDS, word["end"]))
+        word["start"], word["end"] = round(start, 3), round(end, 3)
+        previous = start
     return words
+
+
+def _alignment_chunks(script_tokens, guide, duration, encode):
+    """Keep each alignment inside Whisper's 30-second / 448-token context."""
+    groups = [encode(" " + word) for word in script_tokens]
+    if any(not group for group in groups):
+        raise ValueError("script.txt contains a word that cannot be tokenized.")
+    if duration <= 30 and sum(map(len, groups)) <= 400:
+        return [(0, len(groups), 0., duration)], groups
+    chunks = []
+    first = 0
+    while first < len(groups):
+        lo = max(0., guide[first]["start"] - .35)
+        last, count = first, 0
+        while last < len(groups):
+            size = len(groups[last])
+            if count + size > 400 or guide[last]["end"] - lo > 29.6:
+                break
+            count += size
+            last += 1
+        if last == first:
+            raise ValueError("Cannot locate a safe audio window for the script. Check that script.txt matches the voiceover.")
+        hi = min(duration, guide[last - 1]["end"] + .35, lo + 30.)
+        if hi <= lo:
+            raise ValueError("Invalid script alignment window; check the voiceover and script.")
+        chunks.append((first, last, lo, hi))
+        first = last
+    return chunks, groups
+
+
+def _map_audio_alignment(script_tokens, token_groups, alignment, offset):
+    """Map token spans back to original whitespace words, including split tokens."""
+    spans = []
+    cursor = 0
+    for item in alignment:
+        count = len(item["tokens"])
+        spans.append((cursor, cursor + count, item))
+        cursor += count
+    if cursor != sum(map(len, token_groups)):
+        raise ValueError("The audio aligner did not return every script token.")
+    words, cursor = [], 0
+    for word, group in zip(script_tokens, token_groups):
+        finish = cursor + len(group)
+        hits = [item for lo, hi, item in spans if lo < finish and hi > cursor]
+        words.append({"word": word, "start": offset + float(hits[0]["start"]),
+                      "end": offset + float(hits[-1]["end"])})
+        cursor = finish
+    return words
+
+
+def align_script_to_audio(script_tokens, whisper_words, vo_duration, audio_path, model_name):
+    """Time the supplied text against audio attention, rather than estimating gaps."""
+    from faster_whisper import WhisperModel
+    from faster_whisper.audio import decode_audio, pad_or_trim
+    from faster_whisper.tokenizer import Tokenizer
+
+    if len(script_tokens) * _MIN_WORD_SECONDS > vo_duration + .001:
+        raise ValueError("Too many script words for the voiceover duration. Check script.txt.")
+    model = WhisperModel(model_name, device="cpu", compute_type="int8")
+    tokenizer = Tokenizer(model.hf_tokenizer, model.model.is_multilingual,
+                          task="transcribe", language="ar")
+    # Short recordings align in one pass, independently of an incomplete ASR
+    # transcript. Longer recordings use ASR only to locate bounded audio windows.
+    groups = [tokenizer.encode(" " + word) for word in script_tokens]
+    guide = ([] if vo_duration <= 30 and sum(map(len, groups)) <= 400 else
+             align_script_to_words(script_tokens, whisper_words, vo_duration))
+    chunks, groups = _alignment_chunks(script_tokens, guide, vo_duration, tokenizer.encode)
+    audio = decode_audio(str(audio_path), sampling_rate=16000)
+    out = []
+    for first, last, lo, hi in chunks:
+        log(f"Aligning script words {first + 1}-{last} directly to audio ({lo:.2f}-{hi:.2f}s)...")
+        waveform = audio[int(round(lo * 16000)):int(round(hi * 16000))]
+        if len(waveform) < 400:
+            raise ValueError("Not enough audio for script alignment.")
+        features = model.feature_extractor(waveform)
+        frames = min(features.shape[-1], model.feature_extractor.nb_max_frames)
+        encoded = model.encode(pad_or_trim(features, length=model.feature_extractor.nb_max_frames))
+        text_tokens = [token for group in groups[first:last] for token in group]
+        alignment = model.find_alignment(tokenizer, [text_tokens], encoded, frames)[0]
+        out.extend(_map_audio_alignment(script_tokens[first:last], groups[first:last], alignment, lo))
+    # Several unplaced words mean the script/window does not match the audio.
+    # Do not quietly turn an unrecognized passage into rapidly flashing captions.
+    instant = [w["end"] - w["start"] < .01 for w in out]
+    run = 0
+    for failed in instant:
+        run = run + 1 if failed else 0
+        if run >= 4:
+            raise ValueError("Audio alignment could not locate several consecutive script words. Check that script.txt matches what you said.")
+    if sum(instant) > max(2, len(out) * .2):
+        raise ValueError("Too many script words could not be located in the audio. Check script.txt.")
+    log(f"Direct audio alignment complete: {len(out)} script words.")
+    return _finalize_aligned(out, vo_duration)
 
 
 def apply_script(transcription: dict, vo_duration: float) -> dict:
     tokens = load_script_tokens()
     if tokens is None:
+        (OUTPUT_DIR / "words_aligned.json").unlink(missing_ok=True)
         return transcription
     if not tokens:
         log("WARNING: script.txt is empty. Using the transcribed words instead.")
         return transcription
-    log(f"script.txt found ({len(tokens)} words). Aligning the script with the recording...")
-    aligned = align_script_to_words(tokens, transcription["words"], vo_duration)
-    result = {"transcript": " ".join(tokens), "words": aligned}
-    with open(OUTPUT_DIR / "words_aligned.json", "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+    audio = voiceover_path(PROJECT_PATH)
+    model_name = load_config().get("whisper_model", "large-v3")
+    cache_key = fingerprint({"version": 2, "method": "audio-attention",
+                             "audio": file_digest(audio), "script": tokens,
+                             "duration": vo_duration, "model": model_name,
+                             "guide": transcription.get("words", []) if vo_duration > 30 else None})
+    path = OUTPUT_DIR / "words_aligned.json"
+    cached = read_cache(path)
+    if cached.get("cacheKey") == cache_key and isinstance(cached.get("words"), list):
+        log("Voiceover and script unchanged; reusing direct audio alignment.")
+        return cached
+    log(f"script.txt found ({len(tokens)} words). Aligning the text directly with the recording...")
+    aligned = align_script_to_audio(tokens, transcription["words"], vo_duration, audio, model_name)
+    result = {"cacheKey": cache_key, "method": "audio-attention",
+              "transcript": " ".join(tokens), "words": aligned}
+    write_json(path, result)
     return result
 
 
@@ -504,6 +615,56 @@ def get_audio_duration(path: Path) -> float:
     return float(json.loads(res.stdout)["format"]["duration"])
 
 
+def get_game_definitions(config: dict) -> list[dict]:
+    if config.get("games"):
+        games = config["games"]
+    else:
+        games = []
+        for path in sorted(GAMES_DIR.iterdir()):
+            if path.is_dir() and not path.name.startswith("."):
+                title = re.sub(r"^\d+[_\-\s]+", "", path.name).replace("_", " ").replace("-", " ")
+                games.append({"folder": path.name, "title": title, "spoken_names": [title]})
+    result = []
+    for game in games:
+        path = (GAMES_DIR / game["folder"]).resolve()
+        if not path.is_relative_to(GAMES_DIR.resolve()):
+            raise ValueError(f"Game folder must be inside games/: {game['folder']}")
+        result.append({**game, "path": path, "title": game.get("title", game["folder"]),
+                       "spoken_names": game.get("spoken_names", [])})
+    if not result:
+        raise ValueError("No games configured or found in games/.")
+    return result
+
+
+def resolve_game_clips(path: Path) -> tuple[Path, Path]:
+    if not path.is_dir():
+        raise FileNotFoundError(f"Game folder missing: {path}")
+    candidates = sorted(p for p in path.glob("*.mp4") if p.is_file() and not p.name.startswith("raw_gameplay"))
+    top, bottom = path / "top.mp4", path / "bottom.mp4"
+    if not top.is_file():
+        if not candidates:
+            raise FileNotFoundError(f"No gameplay clips in {path}. Run prepare_assets.py first.")
+        top = candidates[0]
+    if not bottom.is_file():
+        bottom = next((p for p in candidates if p != top), top)
+    return top, bottom
+
+
+def validate_timeline(timeline: dict) -> None:
+    frame = 0
+    for block in timeline["blocks"]:
+        if block["startFrame"] != frame or block["durationFrames"] <= 0:
+            raise ValueError("Timeline blocks must be contiguous and have positive duration.")
+        frame += block["durationFrames"]
+    if frame != timeline["totalFrames"]:
+        raise ValueError("Timeline length does not match its blocks.")
+    previous = -1
+    for word in timeline["words"]:
+        if not (previous < word["startFrame"] < word["endFrame"] <= frame):
+            raise ValueError(f"Caption timing is invalid near {word['word']!r}; check the script and transcription.")
+        previous = word["startFrame"]
+
+
 def build_timeline(transcription: dict, vo_duration: float) -> dict:
     log("Building timeline blocks from voiceover...")
     words = transcription["words"]
@@ -514,84 +675,21 @@ def build_timeline(transcription: dict, vo_duration: float) -> dict:
     bg_blur_scale = float(config.get("bg_blur_scale", BG_BLUR_SCALE))
     reveal_frames = int(config.get("reveal_frames", REVEAL_FRAMES))
 
-    # Detect game folders
-    game_folders = []
-    if "games" in config and len(config["games"]) > 0:
-        for g_cfg in config["games"]:
-            g_path = GAMES_DIR / g_cfg["folder"]
-            game_folders.append({
-                "path": g_path,
-                "folder": g_cfg["folder"],
-                "title": g_cfg.get("title", g_cfg["folder"]),
-                "spoken_names": g_cfg.get("spoken_names", [])
-            })
-    else:
-        # Discover directories
-        for p in sorted(GAMES_DIR.iterdir()):
-            if p.is_dir() and not p.name.startswith("."):
-                name = p.name
-                clean_name = name.split("_", 1)[1] if "_" in name else name
-                game_folders.append({
-                    "path": p,
-                    "folder": name,
-                    "title": clean_name.replace("-", " ").replace("_", " ").title(),
-                    "spoken_names": [clean_name.lower()]
-                })
-
+    game_folders = get_game_definitions(config)
     captions_in_game_blocks = config.get("captions_in_game_blocks", True)
+    timing_config = {"end_padding_seconds": END_PADDING_SECONDS, **config}
+    plan = plan_game_timing(game_folders, words, vo_duration, timing_config, fps)
+    hook_end = plan["hookFrames"] / fps
+    cta_end = plan["totalFrames"] / fps
+    media_lengths = {}
 
-    # Match game timestamps in words
-    num_games = len(game_folders)
-    game_start_times = []
-
-    for g in game_folders:
-        match_time = None
-        spoken_keywords = [k.lower() for k in g["spoken_names"]]
-        for w in words:
-            w_text = w["word"].lower()
-            if any(k in w_text or w_text in k for k in spoken_keywords):
-                match_time = w["start"]
-                break
-        game_start_times.append(match_time)
-
-    # If first game is found, clamp hook to 2.5-4.0s
-    first_game_time = game_start_times[0] if game_start_times and game_start_times[0] else 3.5
-    hook_end = max(2.5, min(4.0, first_game_time))
-
-    # Determine game block boundaries
-    # Each game block should last 4-7 s. If not matched, split evenly.
-    game_boundaries = []
-    prev_end = hook_end
-    cta_duration = 5.0
-    cta_start = vo_duration - cta_duration
-
-    for i in range(num_games):
-        st = game_start_times[i]
-        if st is None or st < prev_end or st > vo_duration - 4.0:
-            # Distribute evenly
-            remaining_time = max(1.0, cta_start - prev_end)
-            block_len = remaining_time / (num_games - i)
-            block_len = max(4.0, min(7.0, block_len))
-            st = prev_end
-            end_t = st + block_len
-        else:
-            if i + 1 < num_games and game_start_times[i + 1]:
-                end_t = game_start_times[i + 1]
-            else:
-                end_t = max(st + 4.5, cta_start)
-
-        # Clamp length to 4.0 - 7.0
-        dur = end_t - st
-        if dur < 4.0:
-            end_t = min(vo_duration, st + 4.0)
-        elif dur > 7.0:
-            end_t = st + 7.0
-
-        game_boundaries.append((st, end_t))
-        prev_end = end_t
-
-    cta_start = game_boundaries[-1][1] if game_boundaries else hook_end
-    cta_end = vo_duration + END_PADDING_SECONDS  # video ends with the voiceover
+    def media_frames(relative: str) -> int:
+        if relative not in media_lengths:
+            duration = get_audio_duration(PUBLIC_DIR / relative)
+            if not math.isfinite(duration) or duration <= 0:
+                raise ValueError(f"Invalid or empty video: {relative}")
+            media_lengths[relative] = max(1, math.floor(duration * fps))
+        return media_lengths[relative]
 
     # Prepare Blocks
     blocks = []
@@ -603,7 +701,8 @@ def build_timeline(transcription: dict, vo_duration: float) -> dict:
         "durationFrames": hook_frames,
         "gtaOffset": 0.8,
         "bgVideo": "gta_background.mp4",
-        "captionY": 0.46
+        "bgDurationFrames": media_frames("gta_background.mp4"),
+        "captionY": float(config.get("hook_caption_y", 0.46))
     })
 
     # GTA offset generator avoiding 0s
@@ -612,24 +711,10 @@ def build_timeline(transcription: dict, vo_duration: float) -> dict:
     # 2. GAME BLOCKS
     current_frame = hook_frames
     for i, g in enumerate(game_folders):
-        st, et = game_boundaries[i]
-        dur_sec = et - st
-        dur_f = int(round(dur_sec * fps))
+        dur_f = plan["gameRanges"][i][1] - plan["gameRanges"][i][0]
 
-        # Check clips in game folder
-        top_clip = g["path"] / "top.mp4"
-        bottom_clip = g["path"] / "bottom.mp4"
+        top_clip, bottom_clip = resolve_game_clips(g["path"])
         pub_logo = next(iter(sorted((PUBLIC_DIR / "games" / g["folder"]).glob("_logo.*"))), None)
-
-        # Fallbacks as per spec
-        all_mp4s = list(g["path"].glob("*.mp4"))
-        if not top_clip.exists() and all_mp4s:
-            top_clip = all_mp4s[0]
-        if not bottom_clip.exists():
-            if len(all_mp4s) > 1:
-                bottom_clip = all_mp4s[1]
-            else:
-                bottom_clip = top_clip
 
         # Match background style: GTA for game 0, Roblox for game 1, Fortnite for game 2 (if present)
         bg_candidates = ["gta_background.mp4", "roblox.mp4", "fortnite.mp4"]
@@ -645,6 +730,10 @@ def build_timeline(transcription: dict, vo_duration: float) -> dict:
             "bgVideo": chosen_bg,
             "folder": g["folder"],
             "title": g["title"],
+            "captionY": float(config.get("game_caption_y", 1205 / 1920)),
+            "bgDurationFrames": media_frames(chosen_bg),
+            "topDurationFrames": media_frames(f"games/{g['folder']}/{top_clip.name}"),
+            "bottomDurationFrames": media_frames(f"games/{g['folder']}/{bottom_clip.name}"),
             "topClip": f"games/{g['folder']}/{top_clip.name}",
             "bottomClip": f"games/{g['folder']}/{bottom_clip.name}",
             "logo": f"games/{g['folder']}/{pub_logo.name}" if pub_logo else "",
@@ -657,11 +746,10 @@ def build_timeline(transcription: dict, vo_duration: float) -> dict:
                 "easing": "easeOutCubic"
             },
             # Logo sits in the middle (between top and bottom clips) with a wiggly wave.
-            # It fades/scales in right when the reveal animation finishes.
+            # Its entrance animation accompanies the clip reveal.
             "logoEffect": {
                 "type": "wiggleWave",
                 "position": "center",
-                "appearAfterFrames": min(reveal_frames, max(1, dur_f - 1)),
                 "amplitude": LOGO_WAVE_AMPLITUDE,
                 "speed": LOGO_WAVE_SPEED,
                 "frequency": LOGO_WAVE_FREQUENCY
@@ -672,14 +760,15 @@ def build_timeline(transcription: dict, vo_duration: float) -> dict:
     # 3. CTA BLOCK
     # Fill exactly up to the end of the voiceover so video and audio end together
     cta_frames = max(1, int(round(cta_end * fps)) - current_frame)
-    cta_bg = "roblox.mp4" if (PUBLIC_DIR / "roblox.mp4").exists() or (PROJECT_PATH / "Roblox 1.mp4").exists() else "gta_background.mp4"
+    cta_bg = "roblox.mp4" if (PUBLIC_DIR / "roblox.mp4").is_file() else "gta_background.mp4"
     blocks.append({
         "type": "cta",
         "startFrame": current_frame,
         "durationFrames": cta_frames,
         "gtaOffset": 7.0,
         "bgVideo": cta_bg,
-        "captionY": 0.72
+        "bgDurationFrames": media_frames(cta_bg),
+        "captionY": float(config.get("cta_caption_y", 0.72))
     })
     current_frame += cta_frames
 
@@ -717,11 +806,9 @@ def build_timeline(transcription: dict, vo_duration: float) -> dict:
         "words": processed_words
     }
 
-    # Save timeline
-    with open(CODE_DIR / "src" / "timeline.json", "w", encoding="utf-8") as f:
-        json.dump(timeline, f, ensure_ascii=False, indent=2)
-    with open(OUTPUT_DIR / "timeline.json", "w", encoding="utf-8") as f:
-        json.dump(timeline, f, ensure_ascii=False, indent=2)
+    validate_timeline(timeline)
+    write_json(CODE_DIR / "src" / "timeline.json", timeline)
+    write_json(OUTPUT_DIR / "timeline.json", timeline)
 
     log("Timeline built successfully.")
     return timeline
@@ -799,47 +886,79 @@ def prepare_logo(src: Path, dest_dir: Path):
         return None
 
 
-def sync_public_assets():
-    log("Syncing assets to Remotion public directory...")
+def sync_public_assets() -> dict:
+    """Copy only referenced assets, and only when their source or copy changed."""
+    log("Syncing required assets to Remotion public directory...")
     PUBLIC_DIR.mkdir(parents=True, exist_ok=True)
-    # GTA background
-    src_gta = PROJECT_PATH / "gta_background.mp4"
-    if not src_gta.exists():
-        src_gta = ENGINE_DIR / "gta_background.mp4"
-    shutil.copy(src_gta, PUBLIC_DIR / "gta_background.mp4")
+    manifest_path = PUBLIC_DIR / ".asset_manifest.json"
+    previous = read_cache(manifest_path)
+    sources, outputs = {}, {}
+    copied = 0
 
-    # Extra gameplay backgrounds matching reference video if available
-    extra_bgs = [
-        ("Roblox 1.mp4", "roblox.mp4"),
-        ("roblox.mp4", "roblox.mp4"),
-        ("Fortnight.mp4", "fortnite.mp4"),
-        ("fortnite.mp4", "fortnite.mp4"),
-    ]
-    for src_name, dst_name in extra_bgs:
-        src_path = PROJECT_PATH / src_name
-        if not src_path.exists():
-            src_path = ENGINE_DIR / src_name
-        if src_path.exists():
-            shutil.copy(src_path, PUBLIC_DIR / dst_name)
+    def publish(source: Path, relative: str, logo=False):
+        nonlocal copied
+        target = PUBLIC_DIR / relative
+        signature = file_signature(source)
+        unchanged = (previous.get("sources", {}).get(relative) == signature
+                     and target.is_file()
+                     and previous.get("outputs", {}).get(relative) == file_signature(target))
+        if not unchanged:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if logo:
+                if prepare_logo(source, target.parent) != target.name:
+                    raise ValueError(f"Could not prepare logo: {source}")
+            else:
+                shutil.copy2(source, target)
+            copied += 1
+        sources[relative] = signature
+        outputs[relative] = file_signature(target)
 
-    # Games
-    pub_games = PUBLIC_DIR / "games"
-    pub_games.mkdir(parents=True, exist_ok=True)
-    for g_dir in GAMES_DIR.iterdir():
-        if not g_dir.is_dir():
+    for name, aliases in {
+        "gta_background.mp4": ["gta_background.mp4"],
+        "roblox.mp4": ["roblox.mp4", "Roblox 1.mp4"],
+        "fortnite.mp4": ["fortnite.mp4", "Fortnight.mp4"],
+    }.items():
+        source = next((base / alias for base in (PROJECT_PATH, ENGINE_DIR)
+                       for alias in aliases if (base / alias).is_file()), None)
+        if source:
+            publish(source, name)
+        elif name == "gta_background.mp4":
+            raise FileNotFoundError("gta_background.mp4 is missing.")
+
+    for game in get_game_definitions(load_config()):
+        top, bottom = resolve_game_clips(game["path"])
+        for clip in {top, bottom}:
+            publish(clip, f"games/{game['folder']}/{clip.name}")
+        logo = find_logo_source(game["path"])
+        if logo:
+            ext = sniff_image_ext(logo) or ".png"
+            publish(logo, f"games/{game['folder']}/_logo{ext}", logo=True)
+
+    # Remove obsolete generated copies, including legacy raw-gameplay copies.
+    # Original project assets are never touched; only regular files under public/.
+    stale = list((PUBLIC_DIR / "games").rglob("*"))
+    stale += [PUBLIC_DIR / name for name in ("gta_background.mp4", "roblox.mp4", "fortnite.mp4")]
+    for path in stale:
+        if not path.is_file() or path.is_symlink():
             continue
-        dest = pub_games / g_dir.name
-        dest.mkdir(parents=True, exist_ok=True)
-        for f in g_dir.iterdir():
-            if f.is_file():
-                shutil.copy(f, dest / f.name)
-        logo_src = find_logo_source(g_dir)
-        if logo_src:
-            name = prepare_logo(logo_src, dest)
-            log(f"Logo for '{g_dir.name}': {logo_src.name} -> {name}")
-        else:
-            log(f"WARNING: no logo image found in games/{g_dir.name} (the text title will be used)")
-    log("Public assets synchronized.")
+        resolved = path.resolve()
+        if not resolved.is_relative_to(PUBLIC_DIR.resolve()):
+            continue
+        relative = path.relative_to(PUBLIC_DIR).as_posix()
+        if relative not in sources and (path.suffix.lower() in IMAGE_EXTS | {".mp4", ".mov", ".mkv", ".webm"}):
+            path.unlink()
+    manifest = {"sources": sources, "outputs": outputs}
+    write_json(manifest_path, manifest)
+    log(f"Assets synchronized: {copied} file(s) copied or converted.")
+    return manifest
+
+
+def render_cache_key(timeline: dict, assets: dict) -> str:
+    dependencies = [Path(__file__), ENGINE_DIR / "pipeline_common.py", CODE_DIR / "package-lock.json", CODE_DIR / "package.json"]
+    dependencies += sorted(path for path in (CODE_DIR / "src").rglob("*")
+                           if path.suffix in {".ts", ".tsx", ".css"})
+    return fingerprint({"version": 1, "timeline": timeline, "assets": assets,
+                        "code": {str(path.resolve()): file_digest(path) for path in dependencies if path.is_file()}})
 
 
 def render_remotion_video(raw_output: Path):
@@ -855,45 +974,58 @@ def render_remotion_video(raw_output: Path):
     log("Remotion render complete.")
 
 
-def process_audio_and_mux(raw_video: Path, final_output: Path, total_duration: float):
-    log("Normalizing audio to -14 LUFS and muxing...")
+def process_audio_and_mux(raw_video: Path, final_output: Path, total_duration: float,
+                          vo: Path | None = None):
+    """Measure and normalize the complete mix, then mux it with the rendered video."""
+    vo = vo or voiceover_path(PROJECT_PATH)
     norm_audio = OUTPUT_DIR / "normalized_audio.aac"
-    vo = PROJECT_PATH / "voiceover.mp3"
+    cache_path = OUTPUT_DIR / "audio_manifest.json"
     music = PROJECT_PATH / "music.mp3"
-
-    pad = f",apad=pad_dur={END_PADDING_SECONDS}" if END_PADDING_SECONDS > 0 else ""
-    fade_out_start = max(0.0, total_duration - 1.0)
-
-    if music.exists():
-        log("music.mp3 detected. Mixing under voiceover at -22 dB with 0.5s fade-in, 1.0s fade-out...")
-        cmd_norm = [
-            "ffmpeg", "-i", str(vo), "-i", str(music),
-            "-filter_complex",
-            f"[0:a]loudnorm=I=-14:LRA=11:TP=-1.5[vo];"
-            f"[1:a]volume=-22dB,afade=t=in:ss=0:d=0.5,afade=t=out:st={fade_out_start}:d=1.0[bgm];"
-            f"[vo][bgm]amix=inputs=2:duration=longest{pad}",
-            "-t", str(total_duration),
-            "-ar", "48000", "-c:a", "aac", "-b:a", "192k",
-            str(norm_audio), "-y"
-        ]
+    inputs = ["-i", str(vo)]
+    if music.is_file():
+        inputs += ["-stream_loop", "-1", "-i", str(music)]
+        fade = max(0., total_duration - 1.)
+        mix = (f"[0:a]apad,atrim=duration={total_duration}[vo];"
+               f"[1:a]volume=-22dB,atrim=duration={total_duration},"
+               f"afade=t=in:st=0:d=0.5,afade=t=out:st={fade}:d=1[bgm];"
+               "[vo][bgm]amix=inputs=2:duration=first:normalize=0[mix];")
     else:
-        cmd_norm = [
-            "ffmpeg", "-i", str(vo),
-            "-af", f"loudnorm=I=-14:LRA=11:TP=-1.5{pad}",
-            "-t", str(total_duration),
-            "-ar", "48000", "-c:a", "aac", "-b:a", "192k",
-            str(norm_audio), "-y"
-        ]
-    subprocess.run(cmd_norm, check=True)
-
-    log(f"Muxing {raw_video.name} and {norm_audio.name} into final.mp4...")
-    cmd_mux = [
-        "ffmpeg", "-i", str(raw_video), "-i", str(norm_audio),
-        "-c:v", "copy", "-c:a", "copy",
-        "-map", "0:v:0", "-map", "1:a:0",
-        "-shortest", str(final_output), "-y"
-    ]
-    subprocess.run(cmd_mux, check=True)
+        mix = f"[0:a]apad,atrim=duration={total_duration}[mix];"
+    key = fingerprint({"version": 1, "voice": file_digest(vo),
+                       "music": file_digest(music) if music.is_file() else None,
+                       "mix": mix, "normalization": "two-pass-I-14-TP-1.5-LRA11"})
+    old = read_cache(cache_path)
+    valid = (old.get("key") == key and norm_audio.is_file()
+             and old.get("output") == file_signature(norm_audio))
+    if not valid:
+        log("Measuring final voiceover/music mix for -14 LUFS normalization...")
+        base = "loudnorm=I=-14:LRA=11:TP=-1.5"
+        measure = ["ffmpeg", "-nostdin", *inputs, "-filter_complex",
+                   mix + f"[mix]{base}:print_format=json[out]", "-map", "[out]",
+                   "-t", str(total_duration), "-f", "null", "-"]
+        result = subprocess.run(measure, capture_output=True, text=True, check=True)
+        matches = re.findall(r'\{[^{}]*"input_i"[^{}]*\}', result.stderr, re.S)
+        if not matches:
+            raise RuntimeError("FFmpeg did not report loudness measurements.")
+        stats = json.loads(matches[-1])
+        norm = base
+        if all(math.isfinite(float(stats[k])) for k in ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")):
+            norm += (f":measured_I={stats['input_i']}:measured_TP={stats['input_tp']}"
+                     f":measured_LRA={stats['input_lra']}:measured_thresh={stats['input_thresh']}"
+                     f":offset={stats['target_offset']}:linear=true")
+        pending = OUTPUT_DIR / "normalized_pending.aac"
+        subprocess.run(["ffmpeg", "-nostdin", "-y", *inputs, "-filter_complex",
+                        mix + f"[mix]{norm}[out]", "-map", "[out]", "-t", str(total_duration),
+                        "-ar", "48000", "-c:a", "aac", "-b:a", "192k", str(pending)], check=True)
+        pending.replace(norm_audio)
+        write_json(cache_path, {"key": key, "output": file_signature(norm_audio)})
+    else:
+        log("Audio inputs unchanged; reusing normalized mix.")
+    pending_video = final_output.with_name("final_pending.mp4")
+    subprocess.run(["ffmpeg", "-nostdin", "-y", "-i", str(raw_video), "-i", str(norm_audio),
+                    "-c:v", "copy", "-c:a", "copy", "-map", "0:v:0", "-map", "1:a:0",
+                    "-t", str(total_duration), "-movflags", "+faststart", str(pending_video)], check=True)
+    pending_video.replace(final_output)
     log("final.mp4 created successfully.")
 
 
@@ -911,46 +1043,52 @@ def export_preview_frames(final_mp4: Path):
     log(f"Preview frames exported to {preview_dir}")
 
 
-def main():
-    log(f"Starting build for PROJECT_DIR: {PROJECT_PATH}")
-    check_required_files()
-    vo_file = PROJECT_PATH / "voiceover.mp3"
-    vo_duration = get_audio_duration(vo_file)
-    log(f"Voiceover duration: {vo_duration:.2f} s")
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Build a captioned gaming video.")
+    parser.add_argument("--project", type=Path, default=PROJECT_PATH, help="Video project folder")
+    parser.add_argument("--force", "-f", action="store_true", help="Render again even if cached")
+    parser.add_argument("--retranscribe", action="store_true", help="Ignore cached voiceover transcription")
+    parser.add_argument("--no-preview", action="store_true", help="Skip JPEG preview frame export")
+    args = parser.parse_args(argv)
+    configure_project(args.project)
+    try:
+        log(f"Starting build for PROJECT_DIR: {PROJECT_PATH}")
+        check_required_files()
+        vo_file = voiceover_path(PROJECT_PATH)
+        vo_duration = get_audio_duration(vo_file)
+        log(f"Voiceover duration: {vo_duration:.2f}s")
+        assets = sync_public_assets()
+        transcription = transcribe_voiceover(vo_file, force=args.retranscribe)
+        transcription = apply_script(transcription, vo_duration)
+        timeline = build_timeline(transcription, vo_duration)
 
-    sync_public_assets()
-    transcription = transcribe_voiceover(vo_file)
-    transcription = apply_script(transcription, vo_duration)   # uses script.txt if present
-    timeline = build_timeline(transcription, vo_duration)
+        raw_video = OUTPUT_DIR / "rendered_raw.mp4"
+        manifest_path = OUTPUT_DIR / "render_manifest.json"
+        key = render_cache_key(timeline, assets)
+        previous = read_cache(manifest_path)
+        valid = (raw_video.is_file() and previous.get("key") == key
+                 and previous.get("output") == file_signature(raw_video))
+        if args.force or not valid:
+            pending = OUTPUT_DIR / "rendered_pending.mp4"
+            pending.unlink(missing_ok=True)
+            render_remotion_video(pending)
+            if abs(get_audio_duration(pending) - timeline["totalDuration"]) > .1:
+                raise ValueError("Rendered video duration does not match the timeline.")
+            pending.replace(raw_video)
+            write_json(manifest_path, {"key": key, "output": file_signature(raw_video)})
+        else:
+            log("Timeline, assets and code unchanged; reusing rendered video.")
 
-    raw_video = OUTPUT_DIR / "rendered_raw.mp4"
-    force_render = "--force" in sys.argv or "-f" in sys.argv
-    if raw_video.exists() and raw_video.stat().st_mtime < Path(__file__).stat().st_mtime:
-        log("build_video.py changed since the last render -> forcing a fresh render.")
-        force_render = True
-    if force_render or not raw_video.exists():
-        if raw_video.exists():
-            raw_video.unlink()
-        render_remotion_video(raw_video)
-    else:
-        log("rendered_raw.mp4 already exists. Re-using for muxing.")
-
-    final_mp4 = OUTPUT_DIR / "final.mp4"
-    process_audio_and_mux(raw_video, final_mp4, timeline["totalDuration"])
-    export_preview_frames(final_mp4)
-
-    log("=" * 60)
-    log("BUILD COMPLETE!")
-    log(f"Output Video: {final_mp4}")
-    log(f"Duration: {timeline['totalDuration']} s")
-    log("Block Timings:")
-    for b in timeline["blocks"]:
-        start_s = b["startFrame"] / 30.0
-        end_s = (b["startFrame"] + b["durationFrames"]) / 30.0
-        desc = b.get("title", b["type"])
-        log(f"  [{b['type'].upper():7s}] {start_s:5.2f}s -> {end_s:5.2f}s : {desc}")
-    log("=" * 60)
+        final_mp4 = OUTPUT_DIR / "final.mp4"
+        process_audio_and_mux(raw_video, final_mp4, timeline["totalDuration"], vo_file)
+        if not args.no_preview:
+            export_preview_frames(final_mp4)
+        log(f"BUILD COMPLETE: {final_mp4} ({timeline['totalDuration']}s)")
+        return 0
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
+        log(f"ERROR: {error}")
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

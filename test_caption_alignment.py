@@ -1,6 +1,11 @@
 import contextlib
 import io
 import unittest
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
+import build_video as build
 
 from build_video import align_script_to_words
 
@@ -68,6 +73,83 @@ class CaptionAlignmentTests(unittest.TestCase):
         aligned = self.align(["begin", "missing", "speech", "end"], words, 5.0)
         self.assertEqual(aligned[1]["start"], 1.0)
         self.assertEqual(aligned[2]["end"], 4.0)
+
+
+class DirectAudioAlignmentTests(unittest.TestCase):
+    def test_short_audio_window_does_not_use_incomplete_transcription(self):
+        # Original failure: ASR only starts at 9.86s. Full short audio must still
+        # align from zero, with no estimated leading-word times as constraints.
+        chunks, groups = build._alignment_chunks(
+            ["first", "game", "second"], [], 27.09, lambda word: [len(word)])
+        self.assertEqual(chunks, [(0, 3, 0., 27.09)])
+        self.assertEqual(len(groups), 3)
+
+    def test_long_alignment_stays_within_audio_and_token_context(self):
+        tokens = [f"word{i}" for i in range(150)]
+        guide = [{"start": i * .5, "end": i * .5 + .4} for i in range(150)]
+        chunks, groups = build._alignment_chunks(tokens, guide, 75., lambda word: [1] * 9)
+        covered = []
+        for first, last, lo, hi in chunks:
+            self.assertLessEqual(hi - lo, 30.)
+            self.assertLessEqual(sum(map(len, groups[first:last])), 400)
+            self.assertGreaterEqual(lo, 0.)
+            self.assertLessEqual(hi, 75.)
+            covered.extend(range(first, last))
+        self.assertEqual(covered, list(range(150)))
+
+    def test_maps_split_model_words_to_original_script_without_guessing(self):
+        alignment = [
+            {"tokens": [1], "start": .2, "end": .4},
+            {"tokens": [2, 3], "start": .4, "end": .7},
+            {"tokens": [4], "start": .9, "end": 1.1},
+        ]
+        words = build._map_audio_alignment(["OpenTTD", "Arabic"], [[1, 2, 3], [4]], alignment, 10.)
+        self.assertEqual(words, [
+            {"word": "OpenTTD", "start": 10.2, "end": 10.7},
+            {"word": "Arabic", "start": 10.9, "end": 11.1},
+        ])
+
+    def test_incomplete_alignment_tokens_raise_error(self):
+        with self.assertRaisesRegex(ValueError, "every script token"):
+            build._map_audio_alignment(["missing"], [[1, 2]],
+                                      [{"tokens": [1], "start": 0., "end": .3}], 0.)
+
+    def test_alignment_cache_refreshes_on_script_and_voice_changes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "output").mkdir()
+            (root / "voiceover.wav").write_bytes(b"first audio")
+            script = root / "script.txt"
+            script.write_text("first game", encoding="utf-8")
+            transcription = {"words": [{"word": "game", "start": 9., "end": 9.3}]}
+            def align(tokens, *args):
+                return [{"word": word, "start": i * .3, "end": i * .3 + .2}
+                        for i, word in enumerate(tokens)]
+            with patch.object(build, "PROJECT_PATH", root), patch.object(build, "OUTPUT_DIR", root / "output"), patch.object(build, "align_script_to_audio", side_effect=align) as aligner, patch.object(build, "log"):
+                result = build.apply_script(transcription, 10.)
+                self.assertEqual(result["method"], "audio-attention")
+                self.assertEqual(build.apply_script(transcription, 10.), result)
+                self.assertEqual(aligner.call_count, 1)
+                script.write_text("new game", encoding="utf-8")
+                changed = build.apply_script(transcription, 10.)
+                self.assertNotEqual(changed["cacheKey"], result["cacheKey"])
+                (root / "voiceover.wav").write_bytes(b"other audio")
+                changed_audio = build.apply_script(transcription, 10.)
+                self.assertNotEqual(changed_audio["cacheKey"], changed["cacheKey"])
+                self.assertEqual(aligner.call_count, 3)
+
+    def test_failed_alignment_does_not_replace_valid_cache_with_estimates(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "output").mkdir()
+            (root / "voiceover.wav").write_bytes(b"audio")
+            (root / "script.txt").write_text("first game", encoding="utf-8")
+            cache = root / "output/words_aligned.json"
+            cache.write_text('{"previous": true}', encoding="utf-8")
+            with patch.object(build, "PROJECT_PATH", root), patch.object(build, "OUTPUT_DIR", root / "output"), patch.object(build, "align_script_to_audio", side_effect=ValueError("not located")), patch.object(build, "log"):
+                with self.assertRaisesRegex(ValueError, "not located"):
+                    build.apply_script({"words": []}, 10.)
+            self.assertEqual(cache.read_text('utf-8'), '{"previous": true}')
 
 
 if __name__ == "__main__":

@@ -2,8 +2,8 @@
  * Organic handheld camera shake (handshake effect)
  * Generates continuous multi-frequency translation and rotation
  */
-export const getHandshake = (frame: number, seed: number = 0) => {
-  const t = (frame + seed * 43.7) / 30;
+export const getHandshake = (frame: number, seed: number = 0, fps: number = 30) => {
+  const t = (frame + seed * 43.7) / fps;
 
   // Multi-frequency harmonic wiggle:
   // Combines slow organic breathing, medium camera sway, and micro-tremor

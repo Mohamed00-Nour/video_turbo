@@ -1,21 +1,23 @@
 import React from "react";
-import { OffthreadVideo, staticFile, useCurrentFrame } from "remotion";
+import { useCurrentFrame } from "remotion";
+import { LoopingVideo } from "./LoopingVideo";
 import { FlashTransition } from "./FlashTransition";
 
 interface CtaBlockProps {
   durationFrames: number;
   gtaOffset: number;
+  bgDurationFrames?: number;
   bgVideo?: string;
 }
 
 export const CtaBlock: React.FC<CtaBlockProps> = ({
   durationFrames,
   gtaOffset,
+  bgDurationFrames,
   bgVideo = "roblox.mp4",
 }) => {
   const frame = useCurrentFrame();
   const zoom = 1.0 + 0.08 * (frame / Math.max(1, durationFrames));
-  const startFrom = Math.round(gtaOffset * 30);
 
   return (
     <div
@@ -36,15 +38,15 @@ export const CtaBlock: React.FC<CtaBlockProps> = ({
           transformOrigin: "center center",
         }}
       >
-        <OffthreadVideo
-          src={staticFile(bgVideo)}
-          startFrom={startFrom}
+        <LoopingVideo
+          src={bgVideo}
+          offsetSeconds={gtaOffset}
+          durationFrames={bgDurationFrames}
           style={{
             width: "100%",
             height: "100%",
             objectFit: "cover",
           }}
-          muted
         />
       </div>
 

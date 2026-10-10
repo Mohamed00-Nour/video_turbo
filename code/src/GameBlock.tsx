@@ -1,12 +1,16 @@
 import React from "react";
-import { Easing, interpolate, OffthreadVideo, staticFile, useCurrentFrame } from "remotion";
+import { Easing, Img, interpolate, staticFile, useCurrentFrame, useVideoConfig } from "remotion";
 import { FlashTransition } from "./FlashTransition";
+import { LoopingVideo } from "./LoopingVideo";
 import { getHandshake } from "./handshake";
 
 interface GameBlockProps {
   durationFrames: number;
   gtaOffset: number;
   bgVideo?: string;
+  bgDurationFrames?: number;
+  topDurationFrames?: number;
+  bottomDurationFrames?: number;
   folder: string;
   title: string;
   topClip: string;
@@ -31,6 +35,7 @@ export const GameBlock: React.FC<GameBlockProps> = ({
   durationFrames,
   gtaOffset,
   bgVideo = "gta_background.mp4",
+  bgDurationFrames, topDurationFrames, bottomDurationFrames,
   title,
   topClip,
   bottomClip,
@@ -41,8 +46,8 @@ export const GameBlock: React.FC<GameBlockProps> = ({
   bgBlurScale = 0.6,
 }) => {
   const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
   const zoom = 1.0 + 0.08 * (frame / Math.max(1, durationFrames));
-  const startFrom = Math.round(gtaOffset * 30);
 
   // ---- Reveal: both clips start stacked at the center, then slide out ----
   // Quick, clean ease-out (no overshoot/bounce).
@@ -66,13 +71,13 @@ export const GameBlock: React.FC<GameBlockProps> = ({
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
-  const hsTop = getHandshake(frame, 0);
-  const hsBot = getHandshake(frame, 2.5);
+  const hsTop = getHandshake(frame, 0, fps);
+  const hsBot = getHandshake(frame, 2.5, fps);
   const shakeTop = { dx: hsTop.dx * shakeAmount, dy: hsTop.dy * shakeAmount, rot: hsTop.rot * shakeAmount };
   const shakeBot = { dx: hsBot.dx * shakeAmount, dy: hsBot.dy * shakeAmount, rot: hsBot.rot * shakeAmount };
 
   // Gentle floating motion for the logo as a whole
-  const logoT = frame / 30;
+  const logoT = frame / fps;
   const logoWiggleX = Math.sin(logoT * 3.0) * 4 + Math.sin(logoT * 7.2) * 1.5;
   const logoWiggleY = Math.cos(logoT * 2.5) * 5 + Math.cos(logoT * 6.1) * 2;
   const logoWiggleRot = Math.sin(logoT * 2.0) * 1.5 + Math.cos(logoT * 5.5) * 0.6;
@@ -122,15 +127,15 @@ export const GameBlock: React.FC<GameBlockProps> = ({
           filter: `blur(${(BASE_BG_BLUR * bgBlurScale).toFixed(2)}px) brightness(0.88)`,
         }}
       >
-        <OffthreadVideo
-          src={staticFile(bgVideo)}
-          startFrom={startFrom}
+        <LoopingVideo
+          src={bgVideo}
+          offsetSeconds={gtaOffset}
+          durationFrames={bgDurationFrames}
           style={{
             width: "100%",
             height: "100%",
             objectFit: "cover",
           }}
-          muted
         />
       </div>
 
@@ -152,14 +157,14 @@ export const GameBlock: React.FC<GameBlockProps> = ({
           zIndex: 10,
         }}
       >
-        <OffthreadVideo
-          src={staticFile(topClip)}
+        <LoopingVideo
+          src={topClip}
+          durationFrames={topDurationFrames}
           style={{
             width: "100%",
             height: "100%",
             objectFit: "cover",
           }}
-          muted
         />
       </div>
 
@@ -181,14 +186,14 @@ export const GameBlock: React.FC<GameBlockProps> = ({
           zIndex: 10,
         }}
       >
-        <OffthreadVideo
-          src={staticFile(bottomClip)}
+        <LoopingVideo
+          src={bottomClip}
+          durationFrames={bottomDurationFrames}
           style={{
             width: "100%",
             height: "100%",
             objectFit: "cover",
           }}
-          muted
         />
       </div>
 
@@ -220,7 +225,7 @@ export const GameBlock: React.FC<GameBlockProps> = ({
               const top = (i / LOGO_STRIPS) * 100;
               const bottom = 100 - ((i + 1) / LOGO_STRIPS) * 100;
               return (
-                <img
+                <Img
                   key={i}
                   src={staticFile(logo)}
                   alt={i === 0 ? title : ""}
