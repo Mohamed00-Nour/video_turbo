@@ -1,0 +1,35 @@
+# Dependencies and Python caches
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+# Generated output and downloaded assets
+/output/
+/games/
+/fonts/
+/referance/
+/code/public/
+/code/backup/
+/code/src/timeline.json
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.mp3
+*.wav
+*.aac
+*.m4a
+/*.png
+/*.jpg
+/*.jpeg
+/*.jfif
+/*.webp
+# Credentials and local settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.DS_Store
+Thumbs.db

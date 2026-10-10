@@ -1,0 +1,20 @@
+{
+  "games": [
+    {
+      "folder": "01_DDLC",
+      "title": "Doki Doki Literature Club",
+      "spoken_names": ["دوكي", "لتلتشر", "كلاب", "doki"]
+    },
+    {
+      "folder": "02_Sven_Co-op",
+      "title": "Sven Co-op",
+      "spoken_names": ["سفين", "كووب", "sven"]
+    },
+    {
+      "folder": "03_Trove",
+      "title": "Trove",
+      "spoken_names": ["تروف", "trove"]
+    }
+  ],
+  "captions_in_game_blocks": false
+}

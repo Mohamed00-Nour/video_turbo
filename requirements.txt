@@ -1,0 +1,4 @@
+faster-whisper
+Pillow
+yt-dlp
+requests

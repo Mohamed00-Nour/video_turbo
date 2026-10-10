@@ -1,0 +1,12 @@
+# games.txt — One line per game
+# Format:  FolderName | YouTube URL
+#
+# - FolderName : starts with a number (01_, 02_, 03_ ...) followed by the game name
+# - YouTube URL: the full URL of a gameplay video for that game
+#
+# Lines starting with # are ignored (comments)
+# ─────────────────────────────────────────────────────────────────────────────
+
+01_Teeworlds          | https://www.youtube.com/watch?v=Ff-Pi7RD9pM
+02_Geneshift    | https://www.youtube.com/watch?v=aQrybgkT-hI
+03_Realm of the Mad god         | https://www.youtube.com/watch?v=JXKXf0m2nTA
