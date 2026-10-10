@@ -41,6 +41,12 @@ class GameplayPreparationTests(unittest.TestCase):
         dest.write_text(str(duration))
         return True
 
+    def test_preflight_metadata_reuses_resolved_streams_without_extraction(self):
+        self.assertTrue(assets.prepare_gameplay(self.url, 4, self.game, info={'duration': 600}))
+        self.fetch.assert_not_called()
+        self.assertEqual(self.download.call_count, 2)
+        self.assertEqual(float((self.game / 'top.mp4').read_text()), 4.0)
+
     def test_finished_clips_skip_all_network_without_raw_video(self):
         (self.game / 'top.mp4').write_text('10.0')
         (self.game / 'bottom.mp4').write_text('10.0')

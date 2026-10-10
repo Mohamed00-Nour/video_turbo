@@ -5,6 +5,7 @@ import timelineData from "./timeline.json";
 import { HookBlock } from "./HookBlock";
 import { GameBlock } from "./GameBlock";
 import { CtaBlock } from "./CtaBlock";
+import { SectionBlock } from "./SectionBlock";
 import { Caption } from "./Caption";
 
 export const MainVideo: React.FC = () => {
@@ -23,6 +24,11 @@ export const MainVideo: React.FC = () => {
     >
       <Series>
         {blocks.map((block: any, index: number) => {
+          if (block.type === "section") {
+            return <Series.Sequence key={index} durationInFrames={block.durationFrames}>
+              <SectionBlock block={block} blur={(timelineData as any).style?.bgBlurScale ?? 0.6} />
+            </Series.Sequence>;
+          }
           if (block.type === "hook") {
             return (
               <Series.Sequence

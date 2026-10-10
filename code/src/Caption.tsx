@@ -29,7 +29,7 @@ export const Caption: React.FC<CaptionProps> = ({ currentFrame }) => {
     }
   }
 
-  if (!currentBlock) return null;
+  if (!currentBlock || currentBlock.captions === false) return null;
 
   if (currentBlock.type === "game" && timelineData.captionsInGameBlocks === false) {
     return null;

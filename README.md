@@ -119,3 +119,138 @@ hook duration. Use aliases matching the recorded words in each game's
 ```powershell
 python -m unittest -v test_pipeline.py test_prepare_assets.py test_caption_alignment.py
 ```
+
+
+## Local Video Turbo Studio
+
+Double-click `start_studio.cmd`, or run:
+
+```powershell
+python video_studio.py
+```
+
+The studio opens at `http://127.0.0.1:8765`. Keep the launcher running while
+editing/rendering. Opening the launcher again opens the existing studio and
+leaves its active job running. Use `--port 8767` if another application occupies
+that port, or `--no-browser` to start without opening a tab. The UI server uses Python's standard library;
+rendering still uses the existing project requirements and Remotion installation.
+
+Create a project, upload a voiceover, and paste the exact spoken script. Add
+clips/screenshots and arrange your sections. New projects live under `projects/`
+and are excluded from Git. Existing video folders alongside the engine appear
+in the sidebar; **Open existing folder** can import another project. Opening a
+folder only reads its assets; saving applies the editor settings to its config
+and script. Unknown configuration settings are preserved. Local registry and
+saved layout presets live under `output/` and are also excluded from Git.
+
+The flexible editor handles any subject, with background-only, one-media,
+stacked-media and title-card layouts. Mix layouts in one video, add labels,
+choose contain/cover framing, adjust caption height, set clip offsets/zoom,
+and optionally highlight an area with percentages of the media card. Save a
+layout preset to reuse that arrangement in another project; media and start
+cues are cleared in reusable presets. Showcase and comparison presets are
+starting arrangements, not restrictions on video categories.
+
+Sections can start at an explicit second or at a phrase in the spoken script.
+Use one of those controls per section. The first section begins at zero, and
+later sections must follow the recording order. Unspecified starts divide time
+evenly between explicit anchors. A section ends when the next begins; the final
+section runs to the end of the voiceover. Clips loop silently; the voiceover and
+optional MP3 music supply the audio. A custom MP4 background replaces the main
+background for that project, and the existing GTA/Roblox/Fortnite library remains
+available. Missing secondary backgrounds fall back to the main background.
+
+The Game series preset retains the existing game pipeline: add each game,
+spoken-name aliases and a YouTube URL, or select uploaded MP4 top/bottom clips.
+Logos are optional. Saving selected clips copies them into the corresponding
+game folder. The UI runs preparation before building when YouTube sources are
+present; its cache avoids unnecessary downloads.
+
+The live layout preview illustrates the current section. **Render preview
+frame** runs the actual caption alignment and renderer at your chosen second;
+its first run can take time while the model loads. **Build video** saves the
+project and runs the pipeline, shows stage/progress/logs, and provides playback
+and download of the finished MP4. Editing is disabled during a job. Only one job
+runs at a time because the existing renderer shares its generated assets and
+timeline. **Cancel job** stops the job's process tree on Windows before a retry.
+Do not run a separate CLI build concurrently with a studio job.
+
+The same scripts still work directly with `--project`. Flexible projects store
+sections in `config.json` instead of a fixed game list. For a still preview:
+
+```powershell
+python build_video.py --project "path/to/project" --preview-only --preview-at 3
+```
+
+Verify the studio and original pipeline:
+
+```powershell
+python -m unittest -v test_video_studio.py test_pipeline.py test_prepare_assets.py test_caption_alignment.py
+```
+
+
+## Optional AI brief import
+
+Both workflows remain available. **New video** opens the manual editor for any
+subject. **Import AI brief** creates a separate Game series project from a JSON
+brief; it never replaces the project currently open. Every imported field can
+be edited with the same manual controls, and uploaded media takes priority.
+
+1. Click **Import AI brief**, then **Copy AI prompt**. Replace the idea, games and
+   target length before sending the prompt to your AI. The prompt asks the AI to
+   browse and verify gameplay sources, keep asset metadata outside the spoken
+   script, and use null when a direct logo image is unavailable.
+2. Paste its JSON or choose a local `.json` file. **Check brief** validates the
+   structure, names, aliases and URL formats and shows a review before creation.
+3. Click **Create project**, upload your recorded voiceover, then preview/build.
+   The recorded words must match the imported script for accurate captions.
+
+The standard import format is:
+
+```json
+{
+  "project_name": "My next game video",
+  "script": "Exact narration, including opening and closing",
+  "games": [
+    {
+      "exact_name": "Game title",
+      "spoken_names": ["Game name exactly as written in the narration"],
+      "youtube_gameplay_url": "A complete, verified YouTube video URL",
+      "logo_image_url": null
+    }
+  ]
+}
+```
+
+Add one entry per game, in narration order. The studio's copied AI prompt uses
+these field names. `logo_image_url` may contain a direct image URL or `null`.
+The original shorter fields (`name`, `gameplay_url`, and `logo_url`) remain
+supported, and the manual editor remains available. If both names for a field
+are supplied, their values must match; conflicting names or links are rejected.
+
+Replace the example gameplay placeholder with a real video URL. JSON code
+fences are accepted. Only the `script` field supplies narration; additional
+metadata is ignored. This import currently automates game-series metadata;
+other subjects continue to use the flexible manual section editor.
+
+Review checks the JSON and URL formats locally. During preparation, new
+uncached gameplay sources from a brief are checked for availability using
+metadata before any footage download starts. Availability cannot guarantee
+that the footage shows the right game: use the review's **View gameplay** links
+to inspect it. Existing clips and cached sources retain the original reuse
+behavior. Downloading still extracts only the required gameplay sections.
+
+`logo_image_url` accepts a direct PNG/JPG/WEBP (or other Pillow-readable raster image)
+link from a public website. Preparation validates the actual image and converts
+it to PNG. An invalid, unavailable or oversized logo produces a warning and
+continues the video; upload a logo or correct its URL to replace it. Logos are
+cached by URL, changed URLs refresh generated logos, and manual images are
+preserved. Direct logo links need no IGDB credentials. The game editor also has
+an image URL field for manually entered projects. Backgrounds, caption styling,
+preview/build and command-line workflows remain available.
+
+Verify the import alongside the studio and pipeline:
+
+```powershell
+python -m unittest -v test_ai_brief.py test_video_studio.py test_pipeline.py test_prepare_assets.py test_caption_alignment.py
+```

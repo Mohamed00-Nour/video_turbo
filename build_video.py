@@ -15,6 +15,7 @@ import subprocess
 import urllib.request
 import argparse
 import math
+import video_sections
 from pipeline_common import (file_digest, file_signature, fingerprint, read_cache,
                              write_json, voiceover_path, plan_game_timing)
 
@@ -102,7 +103,7 @@ def check_required_files():
     voiceover_path(PROJECT_PATH)
 
     # 3. Games directory
-    if not GAMES_DIR.exists() or not any(GAMES_DIR.iterdir()):
+    if "sections" not in load_config() and (not GAMES_DIR.exists() or not any(GAMES_DIR.iterdir())):
         log(f"ERROR: Required folder missing or empty: games/")
         log(f"Expected location: {GAMES_DIR}")
         sys.exit(1)
@@ -611,7 +612,7 @@ def get_audio_duration(path: Path) -> float:
         "-show_entries", "format=duration",
         "-of", "json", str(path)
     ]
-    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
     return float(json.loads(res.stdout)["format"]["duration"])
 
 
@@ -672,6 +673,13 @@ def build_timeline(transcription: dict, vo_duration: float) -> dict:
 
     # Read config.json if present
     config = load_config()
+    if "sections" in config:
+        timeline = video_sections.make_timeline(config, PROJECT_PATH, PUBLIC_DIR, words, vo_duration, get_audio_duration)
+        validate_timeline(timeline)
+        write_json(CODE_DIR / "src" / "timeline.json", timeline)
+        write_json(OUTPUT_DIR / "timeline.json", timeline)
+        log("Section timeline built successfully.")
+        return timeline
     bg_blur_scale = float(config.get("bg_blur_scale", BG_BLUR_SCALE))
     reveal_frames = int(config.get("reveal_frames", REVEAL_FRAMES))
 
@@ -825,7 +833,11 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".jfif", ".jpe", ".pjpeg", ".pjp", ".webp
 _EXT_PRIORITY = {".png": 0, ".webp": 1, ".svg": 2, ".jpg": 3, ".jpeg": 3, ".jfif": 3}
 
 
-def find_logo_source(game_path: Path):
+def find_logo_source(game_path: Path, preferred: str = ""):
+    if preferred:
+        selected = (game_path / preferred).resolve()
+        if selected.is_relative_to(game_path.resolve()) and selected.is_file() and selected.suffix.lower() in IMAGE_EXTS:
+            return selected
     imgs = [f for f in game_path.iterdir()
             if f.is_file() and f.suffix.lower() in IMAGE_EXTS and not f.name.startswith("_logo")]
     if not imgs:
@@ -925,18 +937,24 @@ def sync_public_assets() -> dict:
         elif name == "gta_background.mp4":
             raise FileNotFoundError("gta_background.mp4 is missing.")
 
-    for game in get_game_definitions(load_config()):
+    config = load_config()
+    if "sections" in config:
+        for section in video_sections.validate_sections(config, PROJECT_PATH):
+            for field in ("media", "secondary_media"):
+                if section.get(field):
+                    publish(video_sections.media_path(PROJECT_PATH, section[field]), video_sections.public_media(section[field]))
+    for game in ([] if "sections" in config else get_game_definitions(config)):
         top, bottom = resolve_game_clips(game["path"])
         for clip in {top, bottom}:
             publish(clip, f"games/{game['folder']}/{clip.name}")
-        logo = find_logo_source(game["path"])
+        logo = find_logo_source(game["path"], game.get("logo_file", ""))
         if logo:
             ext = sniff_image_ext(logo) or ".png"
             publish(logo, f"games/{game['folder']}/_logo{ext}", logo=True)
 
     # Remove obsolete generated copies, including legacy raw-gameplay copies.
     # Original project assets are never touched; only regular files under public/.
-    stale = list((PUBLIC_DIR / "games").rglob("*"))
+    stale = list((PUBLIC_DIR / "games").rglob("*")) + list((PUBLIC_DIR / "sections").rglob("*"))
     stale += [PUBLIC_DIR / name for name in ("gta_background.mp4", "roblox.mp4", "fortnite.mp4")]
     for path in stale:
         if not path.is_file() or path.is_symlink():
@@ -954,7 +972,7 @@ def sync_public_assets() -> dict:
 
 
 def render_cache_key(timeline: dict, assets: dict) -> str:
-    dependencies = [Path(__file__), ENGINE_DIR / "pipeline_common.py", CODE_DIR / "package-lock.json", CODE_DIR / "package.json"]
+    dependencies = [Path(__file__), ENGINE_DIR / "pipeline_common.py", ENGINE_DIR / "video_sections.py", CODE_DIR / "package-lock.json", CODE_DIR / "package.json"]
     dependencies += sorted(path for path in (CODE_DIR / "src").rglob("*")
                            if path.suffix in {".ts", ".tsx", ".css"})
     return fingerprint({"version": 1, "timeline": timeline, "assets": assets,
@@ -1003,8 +1021,8 @@ def process_audio_and_mux(raw_video: Path, final_output: Path, total_duration: f
         measure = ["ffmpeg", "-nostdin", *inputs, "-filter_complex",
                    mix + f"[mix]{base}:print_format=json[out]", "-map", "[out]",
                    "-t", str(total_duration), "-f", "null", "-"]
-        result = subprocess.run(measure, capture_output=True, text=True, check=True)
-        matches = re.findall(r'\{[^{}]*"input_i"[^{}]*\}', result.stderr, re.S)
+        result = subprocess.run(measure, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+        matches = re.findall(r'\{[^{}]*"input_i"[^{}]*\}', result.stderr or "", re.S)
         if not matches:
             raise RuntimeError("FFmpeg did not report loudness measurements.")
         stats = json.loads(matches[-1])
@@ -1049,6 +1067,8 @@ def main(argv=None) -> int:
     parser.add_argument("--force", "-f", action="store_true", help="Render again even if cached")
     parser.add_argument("--retranscribe", action="store_true", help="Ignore cached voiceover transcription")
     parser.add_argument("--no-preview", action="store_true", help="Skip JPEG preview frame export")
+    parser.add_argument("--preview-only", action="store_true", help="Render one preview frame without building the full video")
+    parser.add_argument("--preview-at", type=float, default=0, help="Preview time in seconds")
     args = parser.parse_args(argv)
     configure_project(args.project)
     try:
@@ -1061,6 +1081,16 @@ def main(argv=None) -> int:
         transcription = transcribe_voiceover(vo_file, force=args.retranscribe)
         transcription = apply_script(transcription, vo_duration)
         timeline = build_timeline(transcription, vo_duration)
+
+        if args.preview_only:
+            if not math.isfinite(args.preview_at) or not 0 <= args.preview_at < timeline["totalDuration"]:
+                raise ValueError("Preview time must be within the voiceover duration.")
+            npx = shutil.which("npx") or "npx.cmd"
+            target = OUTPUT_DIR / "studio_preview_pending.png"
+            subprocess.run([npx, "--prefix", str(CODE_DIR), "remotion", "still", str(CODE_DIR / "src/index.ts"), "MainVideo", str(target), f"--frame={min(timeline['totalFrames'] - 1, round(args.preview_at * timeline['fps']))}", f"--public-dir={PUBLIC_DIR}"], cwd=str(ENGINE_DIR), shell=(os.name == "nt"), check=True)
+            target.replace(OUTPUT_DIR / "studio_preview.png")
+            log(f"PREVIEW COMPLETE: {OUTPUT_DIR / 'studio_preview.png'}")
+            return 0
 
         raw_video = OUTPUT_DIR / "rendered_raw.mp4"
         manifest_path = OUTPUT_DIR / "render_manifest.json"

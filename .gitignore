@@ -33,3 +33,6 @@ venv/
 *.key
 .DS_Store
 Thumbs.db
+
+# Local video studio projects
+/projects/

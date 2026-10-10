@@ -58,6 +58,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from logo_assets import prepare_logo
 from pipeline_common import file_signature, fingerprint, read_cache, write_json, voiceover_path, plan_game_timing
 
 # ==========================================
@@ -178,7 +179,7 @@ def estimate_game_durations(games: list[dict]) -> list[float]:
     specs = config.get("games") or [{**game, "title": game["game_name"],
                                      "spoken_names": [game["game_name"]]} for game in games]
     plan = plan_game_timing(specs, transcription["words"], duration, config)
-    durations = {spec["folder"]: (end - start) / plan["fps"]
+    durations = {spec["folder"].strip(" ."): (end - start) / plan["fps"]
                  for spec, (start, end) in zip(specs, plan["gameRanges"])}
     if any(game["folder"] not in durations for game in games):
         raise ValueError("games.txt contains a folder missing from config.json games. Align the game lists.")
@@ -196,7 +197,7 @@ def get_video_duration(path: Path) -> float:
         "-of", "json", str(path)
     ]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
         return float(json.loads(res.stdout)["format"]["duration"])
     except Exception as e:
         log(f"WARNING: could not read duration of {path.name}: {e}")
@@ -287,7 +288,7 @@ def cut_clip(src: Path, start_sec: float, duration: float, dest: Path) -> bool:
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(pending),
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True)
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if res.returncode != 0 or not clip_is_ready(pending, duration):
             log(f"  WARNING: ffmpeg could not cut {dest.name}")
             if res.stderr:
@@ -332,7 +333,7 @@ def download_youtube(info: dict, start: float, duration: float, dest: Path) -> b
     return True
 
 
-def prepare_gameplay(url: str, clip_duration: float, game_dir: Path) -> bool:
+def prepare_gameplay(url: str, clip_duration: float, game_dir: Path, info: dict | None = None) -> bool:
     """Reuse finished clips/cache/local footage before requesting remote sections."""
     game_dir.mkdir(parents=True, exist_ok=True)
     paths = [game_dir / "top.mp4", game_dir / "bottom.mp4"]
@@ -363,8 +364,9 @@ def prepare_gameplay(url: str, clip_duration: float, game_dir: Path) -> bool:
     if raw_video and manifest.get("rawSource", manifest.get("source")) not in (None, source_key):
         log("  URL changed; old raw_gameplay footage will not be reused.")
         raw_video = None
-    info = None
     try:
+        if info is not None:
+            write_json(metadata_path, {"duration": float(info["duration"])})
         if raw_video:
             log(f"  Reusing local footage: {raw_video.name}")
             video_duration = get_video_duration(raw_video)
@@ -515,19 +517,39 @@ def run_preparation() -> int:
     games   = parse_games_txt()
     GAMES_DIR.mkdir(parents=True, exist_ok=True)
 
+    # For a newly imported brief, resolve every uncached source before downloading
+    # any footage. Finished local clips and known source metadata avoid this check.
+    verified = {}
+    if config.get('brief_sources'):
+        for game in games:
+            directory = GAMES_DIR / game['folder']
+            local_ready = all(clip_is_ready(directory / filename) for filename in ('top.mp4', 'bottom.mp4'))
+            known_source = (GAMEPLAY_CACHE_DIR / f"{source_cache_key(game['url'])}.json").is_file()
+            local_raw = any(clip_is_ready(p) for p in directory.glob('raw_gameplay.*') if p.suffix.lower() in {'.mp4', '.mkv', '.webm', '.mov'})
+            if not local_ready and not known_source and not local_raw:
+                log(f"Checking gameplay source: {game['game_name']} (metadata only)...")
+                try:
+                    info = fetch_video_info(game['url'])
+                except Exception as error:
+                    raise ValueError(f"Unavailable gameplay for {game['game_name']}: {error}. Correct its YouTube URL.") from None
+                verified[game['folder']] = info
+                log(f"  Source available: {info.get('title', game['game_name'])}")
+
     # Estimate per-game clip durations from existing transcription (if available)
     durations = estimate_game_durations(games)
 
     igdb_id, igdb_secret = get_igdb_credentials(config)
     igdb_available = bool(igdb_id and igdb_secret)
     if not igdb_available:
-        log("IGDB credentials not set — logos will be skipped.")
+        log("IGDB credentials not set; supplied logo URLs and uploaded images can still be used.")
         log("  Add igdb_client_id / igdb_client_secret to config.json, or set environment vars.")
 
+    settings = {g["folder"].strip(" ."): g for g in config.get("games", [])}
     for game, clip_dur in zip(games, durations):
         folder   = game["folder"]
         url      = game["url"]
-        name     = game["game_name"]
+        spec = settings.get(folder, {})
+        name = spec.get("title") or game["game_name"]
         game_dir = GAMES_DIR / folder
 
         log("")
@@ -538,14 +560,17 @@ def run_preparation() -> int:
         game_dir.mkdir(parents=True, exist_ok=True)
 
         # Check completed clips first, then cache / local footage / remote sections.
-        if not prepare_gameplay(url, clip_dur, game_dir):
+        prepared = (prepare_gameplay(url, clip_dur, game_dir, info=verified[folder])
+                    if folder in verified else prepare_gameplay(url, clip_dur, game_dir))
+        if not prepared:
             failures += 1
             log(f"  WARNING: gameplay clips are incomplete for {folder}. Retry after resolving the error.")
 
-        # Download logo from IGDB.
+        # Explicit logo URLs need no IGDB account. Images remain optional.
         logo_dest = game_dir / "logo.png"
-        webp_dest = game_dir / "logo.webp"
-        if logo_dest.exists() or webp_dest.exists():
+        if spec.get('logo_url'):
+            prepare_logo(spec['logo_url'], game_dir, log, manual=spec.get('manual_logo', False))
+        elif any(p.is_file() and p.suffix.lower() in {'.png', '.webp', '.jpg', '.jpeg', '.gif', '.bmp'} for p in game_dir.iterdir()):
             log("  Logo already exists, skipping.")
         elif igdb_available:
             ok = download_logo_igdb(name, logo_dest, igdb_id, igdb_secret)
