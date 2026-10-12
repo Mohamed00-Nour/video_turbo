@@ -24,6 +24,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 from pipeline_common import read_cache, write_json, voiceover_path
 import video_sections as sections
 from ai_brief import parse_brief, image_url
+from publishing import Publisher
 
 ENGINE = Path(__file__).resolve().parent
 WEB = ENGINE / 'studio'
@@ -41,6 +42,7 @@ class Studio:
         self.job = None
         self.process = None
         self.token = secrets.token_urlsafe(32)
+        self.publisher = Publisher(self.data, self.project)
 
     def persist(self):
         write_json(self.data / 'studio_registry.json', self.registry)
@@ -51,6 +53,8 @@ class Studio:
         return Path(self.registry[identifier]['path']).resolve()
 
     def idle(self):
+        if self.publisher.running:
+            raise ValueError('Wait for the publishing upload to finish before changing the video project.')
         if self.job and self.job['status'] in ('running', 'cancelling'):
             raise ValueError('Wait for the current job or cancel it before making changes.')
 
@@ -361,11 +365,26 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == '/api/state':
                 with self.studio.lock:
                     self.json_response({'token': self.studio.token, 'projects': self.studio.list_projects(),
-                                        'presets': list(self.studio.presets), 'job': self.studio.job})
+                                        'presets': list(self.studio.presets), 'job': self.studio.job,
+                                        'publishing_job': self.studio.publisher.active_job()})
             elif parsed.path == '/api/project':
                 with self.studio.lock: self.json_response(self.studio.load(query['id'][0]))
             elif parsed.path == '/api/job':
                 with self.studio.lock: self.json_response(self.studio.job)
+            elif parsed.path == '/api/publishing':
+                self.json_response(self.studio.publisher.snapshot(query['id'][0]))
+            elif parsed.path == '/api/publishing/job':
+                self.json_response(self.studio.publisher.active_job())
+            elif parsed.path == '/api/publishing/callback/youtube':
+                self.studio.publisher.finish_oauth('youtube', query)
+                payload = b'<!doctype html><meta charset="utf-8"><title>YouTube connected</title><p>YouTube is connected. Return to your Video Turbo Studio tab. You can close this tab.</p>'
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(payload)))
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('Referrer-Policy', 'no-referrer')
+                self.end_headers()
+                self.wfile.write(payload)
             elif parsed.path == '/media':
                 project = self.studio.project(query['id'][0])
                 relative = query['file'][0]
@@ -388,7 +407,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not path.is_relative_to(WEB.resolve()) or path.suffix not in ('.html', '.css', '.js'):
                     raise ValueError('Page not found.')
                 self.send_file(path)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
         except (ValueError, KeyError, OSError) as error:
             self.json_response({'error': str(error)}, 400)
@@ -452,6 +471,28 @@ class Handler(BaseHTTPRequestHandler):
                 elif parsed.path == '/api/save': result = self.studio.save(data['id'], data['editor'])
                 elif parsed.path == '/api/start': result = self.studio.start(data['id'], data['action'], data.get('at', 0))
                 elif parsed.path == '/api/cancel': result = self.studio.cancel()
+                elif parsed.path == '/api/publishing/save':
+                    self.studio.idle(); result = self.studio.publisher.save_draft(data['id'], data['draft'])
+                elif parsed.path == '/api/publishing/settings':
+                    self.studio.idle(); result = self.studio.publisher.configure(data['platform'], data)
+                elif parsed.path == '/api/publishing/connect':
+                    self.studio.idle(); result = self.studio.publisher.connect(data['platform'], expected)
+                elif parsed.path == '/api/publishing/oauth/finish':
+                    self.studio.idle(); result = self.studio.publisher.finish_oauth(data['platform'], data['redirect_url'])
+                elif parsed.path == '/api/publishing/token':
+                    self.studio.idle(); result = self.studio.publisher.connect_token(data['platform'], data['access_token'], data.get('page_id', ''))
+                elif parsed.path == '/api/publishing/disconnect':
+                    self.studio.idle(); result = self.studio.publisher.disconnect(data['platform'])
+                elif parsed.path == '/api/publishing/start':
+                    self.studio.idle()
+                    result = self.studio.publisher.start(data['id'], data['platform'], data['draft'],
+                              data.get('reviewed', False), data.get('video_signature', ''))
+                elif parsed.path == '/api/publishing/verify-youtube':
+                    self.studio.idle(); result = self.studio.publisher.verify_youtube(data['id'], data['job_id'], data['url'])
+                elif parsed.path == '/api/publishing/verify-facebook':
+                    self.studio.idle(); result = self.studio.publisher.verify_facebook(data['id'], data['job_id'])
+                elif parsed.path == '/api/publishing/mark':
+                    self.studio.idle(); result = self.studio.publisher.mark(data['id'], data['platform'], data.get('url', ''))
                 elif parsed.path == '/api/preset':
                     self.studio.idle()
                     if not str(data['name']).strip(): raise ValueError('Name the preset.')

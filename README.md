@@ -254,3 +254,158 @@ Verify the import alongside the studio and pipeline:
 ```powershell
 python -m unittest -v test_ai_brief.py test_video_studio.py test_pipeline.py test_prepare_assets.py test_caption_alignment.py
 ```
+
+
+## Publishing finished videos
+
+Open a completed project and click **Publish video** beside the download button.
+The panel previews `output/final.mp4` and saves a title, caption, hashtags and
+posting options for that project. Metadata defaults to the project name and
+script. The editor and command-line build workflow remain available.
+
+| Destination | Available workflow |
+| --- | --- |
+| YouTube | Direct MP4 upload after Google app setup and channel connection; private, unlisted or public visibility. |
+| Instagram Professional | Direct Reel publishing after Meta app setup/account connection, using a publicly hosted HTTPS URL for the finished MP4. Assisted upload is also available. |
+| TikTok | Download the MP4, copy the caption, open TikTok's uploader and finish posting there. |
+| Facebook Page | Direct local MP4 upload and confirmed Reel publishing after connecting a Page access token; no public video URL is required. |
+| Facebook personal profile | Download the MP4, copy the caption, open Facebook's Reel creator and finish posting there. |
+
+For a direct upload, select the destination and its options, watch the preview,
+check the review box, then click **Upload to YouTube** or **Publish Instagram
+Reel** or **Publish Facebook Page Reel**. Each click starts one upload. Changing posting options or the finished
+file clears the review. A completed upload of the same file to the same platform
+is blocked to prevent duplicate posts. Facebook Page uploads track the connected
+Page ID, so publishing the same video to a different Page is allowed.
+
+Progress and publishing history appear in the panel. Keep the Studio process
+running until the upload finishes; closing the panel is fine. YouTube recovers
+transient connection failures by querying the existing upload session. Uploads
+use 1 MiB chunks; status queries retry network failures and transient server
+errors up to five times before reporting a safe error reason. A Studio
+restart marks an unfinished attempt as interrupted. After an interrupted or
+uncertain attempt, check the platform before retrying, since a remote upload
+may have succeeded even when its response was lost. If the video appears in
+YouTube Studio, paste its video link into **Check existing upload** in the job
+panel. This makes read-only API checks and updates the local history only after
+YouTube confirms processing is complete and the channel, title and file size
+match. While YouTube is still processing, it asks you to wait rather than marking
+the attempt successful. It never uploads another copy.
+
+Assisted uploads have **Copy caption**, **Open uploader** and **Mark published**
+controls. Marking a post only records its optional post link in local history;
+it does not upload anything. When posting inside Instagram, you can use your
+existing **Share to Facebook** option. Instagram API publishing does not
+guarantee that this native sharing setting applies.
+
+### Connect YouTube
+
+1. Create/select a project in [Google Cloud Console](https://console.cloud.google.com/).
+   Enable **YouTube Data API v3** and configure the OAuth consent screen. If the
+   app is in testing, add your Google account as a test user.
+2. Create an OAuth client with application type **Desktop app**. Copy its client
+   ID and client secret into **Account setup > YouTube**, then save.
+3. Click **Connect channel**, select your Google account/channel and grant the
+   requested upload/read permissions. Google returns to the local Studio
+   callback displayed in the panel, and the connected channel name appears.
+4. Try a **Private** upload first and inspect it in YouTube Studio before
+   uploading publicly. Upload completion does not mean YouTube has finished
+   processing the video.
+
+The connection uses the installed-app loopback callback, OAuth state and PKCE.
+Saved refresh tokens renew access where available. Google app testing status,
+permissions and quota can require reconnecting or completing further Google
+setup. See [Google's installed-app OAuth guide](https://developers.google.com/identity/protocols/oauth2/native-app)
+and [YouTube upload documentation](https://developers.google.com/youtube/v3/docs/videos/insert).
+
+### Connect Instagram
+
+Your account must be **Professional** (Business or Creator). This integration
+uses **Instagram API with Instagram Login**, which does not require a Facebook
+Page. Create/configure a Meta app with Instagram Login and enable
+`instagram_business_basic` and `instagram_business_content_publish`.
+
+For your own account during development, add/authorize the account in your
+Meta app's Instagram setup. You can paste the app-generated Instagram access
+token into the token connection field and click **Connect with token**. Studio
+checks the account identity before saving it. Tokens must carry publishing
+permission; generating a token alone does not grant additional permissions.
+
+Alternatively, save the Instagram app ID, app secret and a registered HTTPS
+OAuth redirect URL, then click **Connect account**. Finish Instagram sign-in
+and paste the full completed redirect URL into the panel's callback field.
+The URL must match the redirect used for that sign-in and contain its code and
+state. Studio validates the state and exchanges the code for account access.
+The registered redirect is separate from the local Studio address.
+
+For direct Reels publishing, host **this finished MP4** at a public HTTPS URL
+that Meta can download without a login, then paste it into **Public video URL**.
+A local disk path, localhost address, or Studio download URL will not work.
+Studio does not host the video publicly. If you do not want public hosting, use
+the panel's download/copy/open Instagram workflow. **Share to Instagram feed**
+controls the Instagram feed, not Facebook sharing. Instagram fetches/processes
+the video before the publish request; the panel shows that stage.
+
+See [Meta's Instagram API documentation](https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api)
+for account roles, app review requirements, permissions and media limitations.
+Connecting other people's accounts can require additional platform approval.
+
+### Connect a Facebook Page
+
+Facebook Page publishing uses a **Page access token** issued by your Meta app.
+The Instagram token cannot authorize publishing to a Facebook Page. Your
+Facebook personal profile remains available through assisted upload.
+
+1. In [Meta apps](https://developers.facebook.com/apps/), add the **Manage
+   everything on your Page** use case. If your current Instagram app cannot
+   add that use case, create a separate app for Page publishing.
+2. Open [Graph API Explorer](https://developers.facebook.com/tools/explorer/)
+   and select the Page publishing app. Authorize your Facebook account with
+   `pages_show_list`, `pages_read_engagement` and `pages_manage_posts`, granting
+   access to the Page you want to connect. For a Page in a business portfolio,
+   also request `business_management` to list its Pages. Generate a new user
+   token after adding permissions and authorize the intended business and Page.
+   Your account needs permission to create content on that Page. During app
+   development, use an account with the appropriate app role; publishing for
+   other users may require App Review.
+3. Open **User or Page** and select your Page under **Page Access Tokens**.
+   Alternatively, run
+   `GET me/accounts?fields=id,name,access_token,tasks` with the authorized user
+   token and copy the **access_token for the intended Page** from the response.
+4. In Studio, open a completed project > **Publish video** > **Facebook Page**
+   > **Connect Page / account setup**. Paste the Page token and click **Connect
+   Page**. Studio detects its numeric Page ID and displays the Page name. The
+   optional Page ID field checks that the token belongs to that exact Page.
+5. Select **Facebook Page Reel**, confirm the displayed Page and posting
+   details, review the final video, then click **Publish Facebook Page Reel**.
+   Studio streams the local MP4 directly to Meta and waits for the publishing
+   phase to complete before recording success. No Cloudflare link is needed.
+
+Studio stores the video ID before requesting publication. If the finish response
+is lost or Studio restarts, it blocks another upload of the same file to that
+Page until the existing attempt is checked. Click **Check existing upload** on
+its history entry: this only reads the video's status and checks Page ownership.
+A confirmed published Reel updates history; ongoing processing asks you to wait.
+A confirmed failed upload permits a new reviewed attempt. Upload and publication
+requests are never automatically repeated. A confirmed success remains successful
+if the later permalink lookup fails; a link using the confirmed video ID is shown.
+
+Page tokens can expire or be revoked; reconnect in account setup when required.
+See [Meta's Page Reel publishing sample](https://github.com/fbsamples/reels_publishing_apis/tree/main/fb_reels_publishing_api_sample)
+for the upload protocol and required Page permissions.
+
+### Local storage and verification
+
+Publishing drafts, history, job state and account connections live in
+`output/publishing/`, which is excluded from Git. On Windows, app secrets and
+account tokens are protected with DPAPI for the Windows user that connected
+them. On other systems, the credential file uses restricted local file
+permissions. The browser receives account names and connection status, never
+stored tokens or app secrets. Disconnect removes the saved account connection.
+
+The publishing checks simulate provider responses and use temporary projects;
+they do not upload to real accounts:
+
+```powershell
+python -m unittest -v test_publishing.py test_facebook_publishing.py
+```
