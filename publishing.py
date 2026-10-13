@@ -16,12 +16,15 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 from pipeline_common import file_signature, fingerprint, read_cache, write_json
-from publishing_clients import youtube_upload, instagram_publish, public_video_url, InstagramProcessingError
+from publishing_clients import youtube_upload, instagram_publish, public_video_url, InstagramProcessingError, ProviderRequestError, request_json
 from facebook_publishing import facebook_publish, facebook_status, facebook_id, facebook_permalink, facebook_publication_state, FacebookPublishError
+from instagram_publishing import instagram_local_publish, instagram_container_status, InstagramPublishError
+from publishing_clients import _instagram_id
 
 OAUTH = ('youtube', 'instagram')
 DIRECT = OAUTH + ('facebook_page',)
 PLATFORMS = DIRECT + ('facebook', 'tiktok')
+POST_FIELDS = {'title': 100, 'description': 5000, 'hashtags': 1500}
 HELP = {
     'youtube': 'https://console.cloud.google.com/apis/credentials',
     'instagram': 'https://developers.facebook.com/apps/',
@@ -111,6 +114,7 @@ class Publisher:
             entry.update(status=job['status'], finished=job.get('finished'), url=job.get('url', ''),
                          error=job.get('error', ''), remote_id=job.get('remote_id', ''), warning=job.get('warning', ''),
                          container_id=job.get('container_id', ''), processing_status=job.get('processing_status', ''),
+                         network_reason=job.get('network_reason', ''),
                          publish_attempted=job.get('publish_attempted', False))
             self._save_record(job['project'], record)
 
@@ -129,7 +133,8 @@ class Publisher:
         return {'title': str(editor.get('name') or root.name)[:100],
                 'description': script.read_text(encoding='utf-8-sig')[:1800] if script.is_file() else '',
                 'hashtags': '', 'youtube_privacy': 'private', 'made_for_kids': False,
-                'instagram_share_to_feed': True, 'instagram_video_url': '', 'facebook_page_id': ''}
+                'instagram_share_to_feed': True, 'instagram_video_url': '', 'facebook_page_id': '',
+                'platform_overrides': {}}
 
     def _draft(self, identifier, raw):
         if not isinstance(raw, dict): raise ValueError('Publishing settings must be an object.')
@@ -150,6 +155,31 @@ class Publisher:
             value = raw.get(key, result[key])
             if not isinstance(value, bool): raise ValueError('Use the checkbox for ' + key.replace('_', ' ') + '.')
             result[key] = value
+        overrides = raw.get('platform_overrides', {})
+        if not isinstance(overrides, dict) or any(platform not in PLATFORMS for platform in overrides):
+            raise ValueError('Use a supported destination for platform posting details.')
+        for platform, fields in overrides.items():
+            if not isinstance(fields, dict) or any(key not in POST_FIELDS for key in fields):
+                raise ValueError('Platform overrides may contain only title, description and hashtags.')
+            normalized = {}
+            for key, value in fields.items():
+                if not isinstance(value, str) or len(value) > POST_FIELDS[key]:
+                    raise ValueError(f'{platform} {key} must be text of at most {POST_FIELDS[key]} characters.')
+                value = value.strip()
+                if key == 'hashtags':
+                    value = ' '.join('#' + tag.strip(',').lstrip('#') for tag in value.split() if tag.strip(',#'))
+                    if len(value) > POST_FIELDS[key]:
+                        raise ValueError('Platform hashtags must fit within 1,500 characters.')
+                normalized[key] = value
+            if normalized:
+                result['platform_overrides'][platform] = normalized
+        return result
+
+    @staticmethod
+    def _platform_draft(draft, platform):
+        result = dict(draft)
+        overrides = result.pop('platform_overrides', {})
+        result.update(overrides.get(platform, {}))
         return result
 
     def _accounts(self):
@@ -157,8 +187,15 @@ class Publisher:
         for platform in DIRECT:
             settings = self.vault['settings'].get(platform, {})
             account = self.vault['accounts'].get(platform, {})
+            linked = platform == 'instagram' and account.get('connection_type') == 'facebook'
+            page = self.vault['accounts'].get('facebook_page', {}) if linked else {}
+            unavailable = linked and (not page.get('access_token') or page.get('needs_reconnect') or page.get('page_id') != account.get('page_id'))
             result[platform] = {'configured': bool(settings.get('client_id') and settings.get('client_secret')),
-                'connected': bool(account.get('access_token') or account.get('refresh_token')),
+                'connected': bool(page.get('access_token') if linked else account.get('access_token') or account.get('refresh_token')) and not account.get('needs_reconnect', False) and not unavailable,
+                'needs_reconnect': bool(account.get('needs_reconnect') or unavailable),
+                'connection_type': account.get('connection_type', 'instagram_login' if platform == 'instagram' else ''),
+                'upload_mode': 'local' if linked else 'url' if platform == 'instagram' else 'local',
+                'user_id': account.get('user_id', ''), 'source_page_name': account.get('source_page_name', ''),
                 'name': account.get('name', ''), 'client_id': settings.get('client_id', ''),
                 'has_secret': bool(settings.get('client_secret')), 'redirect_uri': settings.get('redirect_uri', ''),
                 'help_url': HELP[platform], 'page_id': account.get('page_id', '')}
@@ -296,18 +333,71 @@ class Publisher:
         if not identifier or not profile.get('username'): raise ValueError('The token did not identify an Instagram professional account.')
         return {'access_token': token, 'user_id': str(identifier), 'name': '@' + profile['username'], 'api_version': 'v26.0'}
 
-    def _facebook_page_identity(self, token, expected_id=''):
+    def _facebook_connection_error(self, error, *tokens):
+        # Meta's field/access errors explain code 100. Redact all known secrets
+        # before using those details in UI text; never include provider URLs.
+        detail = error.provider_message
+        for token in tokens:
+            if token:
+                detail = detail.replace(token, '[redacted]')
+        detail = re.sub(r'(?:EAA|IGAA)[A-Za-z0-9_-]{8,}', '[redacted]', detail)
+        detail = self._safe_error(ValueError(detail))
+        if detail:
+            return 'Facebook Page connection failed (code ' + str(error.provider_code) + '): ' + detail
+        return str(error)
+
+    def _facebook_page_identity(self, token, expected_id='', resolve_user=True):
         if expected_id:
             expected_id = facebook_id(expected_id)
-        profile = self._request('GET', 'https://graph.facebook.com/v26.0/me',
-            headers={'Authorization': 'Bearer ' + token}, params={'fields':'id,name,category'})
-        # category belongs to a Page, not a personal-profile /me object.
-        if not profile.get('name') or not isinstance(profile.get('category'), str) or not profile['category']:
-            raise ValueError('Use a Facebook Page access token, rather than a personal-profile or Instagram token.')
+        # A Page's access_token field establishes Page identity. Tokens obtained
+        # from /me/accounts already have Page provenance; only verify their ID.
+        fields = 'id,name,access_token' if resolve_user else 'id,name'
+        try:
+            profile = request_json(self.session, 'GET', 'https://graph.facebook.com/v26.0/me',
+                headers={'Authorization': 'Bearer ' + token}, params={'fields': fields})
+        except ProviderRequestError as error:
+            missing_page_field = (error.provider_code == 100 and re.search(
+                r'nonexisting field\s*\(access_token\)', error.provider_message, re.IGNORECASE))
+            if resolve_user and missing_page_field:
+                return self._facebook_page_from_user_token(token, expected_id)
+            if error.provider_code == 100:
+                raise ValueError(self._facebook_connection_error(error, token)) from None
+            raise
+        if not profile.get('name'):
+            raise ValueError('The token did not identify a Facebook Page.')
         identifier = facebook_id(profile.get('id'))
+        if resolve_user and (not isinstance(profile.get('access_token'), str) or not profile['access_token'].strip()):
+            return self._facebook_page_from_user_token(token, expected_id)
         if expected_id and identifier != expected_id:
             raise ValueError('This token belongs to another Facebook Page. Check the Page ID and token.')
         return {'access_token':token, 'page_id':identifier, 'name':str(profile['name']), 'api_version':'v26.0'}
+
+    def _facebook_page_from_user_token(self, token, expected_id):
+        # Match the chosen Page explicitly; never select a different Page.
+        try:
+            result = request_json(self.session, 'GET', 'https://graph.facebook.com/v26.0/me/accounts',
+                headers={'Authorization':'Bearer ' + token},
+                params={'fields':'id,name,access_token,tasks', 'limit':100})
+        except ProviderRequestError as error:
+            if error.provider_code in (100, 10, 200):
+                raise ValueError(self._facebook_connection_error(error, token)) from None
+            raise
+        pages = result.get('data')
+        if not isinstance(pages, list):
+            raise ValueError('Facebook did not return the Pages managed by this token.')
+        matches = [page for page in pages if isinstance(page, dict)
+                   and (not expected_id or str(page.get('id')) == expected_id)]
+        if not matches and result.get('paging', {}).get('next'):
+            raise ValueError('The selected Page was not in the first 100 results. Select its Page access token in Graph API Explorer and paste that token.')
+        if not matches:
+            raise ValueError('This User token cannot access the selected Page. Authorize that Page in Meta, include pages_show_list and pages_read_engagement, and generate a new token.')
+        if len(matches) != 1:
+            raise ValueError('This User token manages multiple Pages. Enter the intended Page ID in Account setup before connecting.')
+        page = matches[0]
+        page_token = page.get('access_token')
+        if not isinstance(page_token, str) or not page_token:
+            raise ValueError('Facebook did not return a Page access token for the selected Page. Reauthorize the Page with publishing permissions.')
+        return self._facebook_page_identity(page_token, facebook_id(page.get('id')), resolve_user=False)
 
     def connect_token(self, platform, token, page_id=''):
         with self.lock:
@@ -321,6 +411,64 @@ class Publisher:
             self._vault_save()
             return {'ok': True}
 
+    def connect_instagram_page(self):
+        """Resolve and verify the linked professional account using GETs only."""
+        with self.lock:
+            self._idle()
+            page = self._access_account('facebook_page')
+            token = page['access_token']
+            try:
+                profile = request_json(self.session, 'GET', 'https://graph.facebook.com/v26.0/' + page['page_id'],
+                    headers={'Authorization':'Bearer ' + token},
+                    params={'fields':'id,instagram_business_account{id,username}'})
+                if str(profile.get('id')) != page['page_id']:
+                    raise ValueError('Facebook returned a different Page. Reconnect the intended Page before connecting Instagram.')
+                linked = profile.get('instagram_business_account')
+                if not isinstance(linked, dict) or not linked.get('id') or not linked.get('username'):
+                    raise ValueError('Meta did not return a linked Instagram professional account. Link Instagram in your Facebook Page settings under Linked accounts, and reconnect the Page with instagram_basic, instagram_content_publish and pages_read_engagement permissions.')
+                identifier = _instagram_id(linked['id'], 'linked account ID')
+                limit = request_json(self.session, 'GET', 'https://graph.facebook.com/v26.0/' + identifier + '/content_publishing_limit',
+                    headers={'Authorization':'Bearer ' + token}, params={'fields':'config,quota_usage'})
+                if not isinstance(limit.get('data'), list) or not any(isinstance(row, dict) and isinstance(row.get('quota_usage'), int) and not isinstance(row['quota_usage'], bool) for row in limit['data']):
+                    raise ValueError('Instagram publishing access could not be verified. Authorize instagram_content_publish for the linked account in your Meta app.')
+            except ProviderRequestError as error:
+                if error.provider_code == 190:
+                    self.vault['accounts']['facebook_page']['needs_reconnect'] = True
+                    self._vault_save()
+                    raise
+                if error.provider_code in (10, 100, 200):
+                    detail = self._facebook_connection_error(error, token).replace('Facebook Page connection failed', 'Instagram local upload setup failed', 1)
+                    raise ValueError(detail + ' Add instagram_basic and instagram_content_publish in Meta, authorize the linked account, and reconnect the Facebook Page with a fresh token.') from None
+                raise
+            account = {'connection_type':'facebook', 'user_id':identifier, 'name':'@' + str(linked['username']),
+                'page_id':page['page_id'], 'source_page_name':page['name'], 'api_version':'v26.0'}
+            self.vault['accounts']['instagram'] = account
+            self._vault_save()
+            return {'ok':True, 'message':'Connected ' + account['name'] + ' for local MP4 uploads. No public video link is needed.'}
+
+    def check_account(self, platform):
+        """Check the saved Page identity without uploading or publishing."""
+        with self.lock:
+            self._idle()
+            if platform != 'facebook_page':
+                raise ValueError('Choose the Facebook Page connection to check.')
+            account = self.vault['accounts'].get(platform, {})
+            if not account.get('access_token'):
+                raise ValueError('Connect your Facebook Page first.')
+            try:
+                identity = self._facebook_page_identity(account['access_token'], account.get('page_id', ''))
+            except ProviderRequestError as error:
+                if error.provider_code != 190:
+                    raise
+                account['needs_reconnect'] = True
+                self._vault_save()
+                return {'ok': False, 'needs_reconnect': True, 'error_code': error.provider_code,
+                        'error_subcode': error.provider_subcode,
+                        'message': 'Your Facebook Page access token has expired or is invalid. Reconnect the Page in Account setup with a fresh Page access token.'}
+            self.vault['accounts'][platform] = {**account, **identity, 'needs_reconnect': False}
+            self._vault_save()
+            return {'ok': True, 'message': 'Facebook Page connection verified: ' + identity['name'] + '.'}
+
     def disconnect(self, platform):
         with self.lock:
             self._idle()
@@ -332,7 +480,14 @@ class Publisher:
 
     def _access_account(self, platform):
         account = copy.deepcopy(self.vault['accounts'].get(platform, {}))
+        if platform == 'instagram' and account.get('connection_type') == 'facebook':
+            page = self._access_account('facebook_page')
+            if page.get('page_id') != account.get('page_id'):
+                raise ValueError('The Facebook Page changed. Reconnect Instagram from the intended Page before publishing.')
+            return {**account, 'access_token':page['access_token']}
         if not account.get('access_token'): raise ValueError('Connect your ' + platform.capitalize() + ' account first.')
+        if platform == 'facebook_page' and account.get('needs_reconnect'):
+            raise ValueError('Reconnect your Facebook Page with a fresh Page access token in Account setup.')
         expires = account.get('expires_at', 0)
         if expires and expires < time.time() + 120:
             if platform == 'youtube':
@@ -364,12 +519,14 @@ class Publisher:
             if video_signature != video['signature']: raise ValueError('The finished video changed. Reload the publishing screen and review it again.')
             draft = self._draft(identifier, draft)
             if not self._accounts()[platform]['connected']: raise ValueError('Connect your ' + platform.capitalize() + ' account first.')
-            caption = '\n\n'.join(x for x in (draft['description'], draft['hashtags']) if x)
+            post = self._platform_draft(draft, platform)
+            caption = '\n\n'.join(x for x in (post['description'], post['hashtags']) if x)
             if platform == 'youtube':
-                if not draft['title'] or '<' in draft['title'] or '>' in draft['title']: raise ValueError('YouTube needs a title without angle brackets.')
+                if not post['title'] or '<' in post['title'] or '>' in post['title']: raise ValueError('YouTube needs a title without angle brackets.')
                 if len(caption) > 5000: raise ValueError('YouTube description and hashtags must fit within 5,000 characters.')
             elif platform == 'instagram':
-                draft['instagram_video_url'] = public_video_url(draft['instagram_video_url'])
+                if self.vault['accounts'][platform].get('connection_type') != 'facebook':
+                    post['instagram_video_url'] = public_video_url(draft['instagram_video_url'])
                 if len(caption) > 2200: raise ValueError('Instagram caption and hashtags must fit within 2,200 characters.')
             destination_id = ''
             destination_name = ''
@@ -379,27 +536,38 @@ class Publisher:
                 destination_name = account['name']
                 if draft['facebook_page_id'] != destination_id:
                     raise ValueError('The Facebook Page changed. Reload the publishing screen and review the destination again.')
+            if platform == 'instagram':
+                account = self.vault['accounts'][platform]
+                destination_id = _instagram_id(account.get('user_id'), 'account ID')
+                destination_name = account['name']
             record = self._record(identifier)
             matching = [row for row in record['history'] if row.get('platform') == platform
                         and row.get('video_signature') == video_signature
-                        and (platform != 'facebook_page' or row.get('destination_id') == destination_id)]
+                        and (platform != 'facebook_page' or row.get('destination_id') == destination_id)
+                        and (platform != 'instagram' or not row.get('destination_id') or row.get('destination_id') == destination_id)]
             if platform == 'facebook_page' and any(row.get('status') in ('failed', 'interrupted')
                     and row.get('publish_attempted') and not row.get('confirmed_unpublished') for row in matching):
                 raise ValueError('A Facebook publish may already have succeeded. Check the existing upload before starting another.')
+            if platform == 'instagram' and any(row.get('status') in ('failed', 'interrupted')
+                    and (row.get('publish_attempted') or row.get('processing_status') == 'PUBLISHED')
+                    and not row.get('confirmed_unpublished') for row in matching):
+                raise ValueError('An Instagram publish may already have succeeded. Check the existing upload before starting another.')
             if any(row.get('status') in ('complete', 'manual') for row in matching):
                 raise ValueError('This video is already recorded as uploaded to ' + platform.capitalize() + '. Check its history before posting again.')
             record['draft'] = draft
             job = {'id': uuid.uuid4().hex, 'project': identifier, 'platform': platform, 'status': 'running',
                 'stage': 'Connecting to account', 'progress': 0, 'started': time.time(), 'error': '', 'url': '',
-                'destination_id':destination_id, 'destination_name':destination_name}
+                'destination_id':destination_id, 'destination_name':destination_name,
+                'instagram_connection_type':self.vault['accounts'][platform].get('connection_type', 'instagram_login') if platform == 'instagram' else ''}
             record['history'].append({'id': job['id'], 'platform': platform, 'status': 'running', 'url': '',
-                'title': draft['title'], 'created': job['started'], 'video_signature': video_signature,
+                'title': post['title'], 'created': job['started'], 'video_signature': video_signature,
                 'visibility': draft['youtube_privacy'] if platform == 'youtube' else 'account', 'method': 'api',
-                'destination_id':destination_id, 'destination_name':destination_name})
+                'destination_id':destination_id, 'destination_name':destination_name,
+                'instagram_connection_type':job['instagram_connection_type']})
             self._save_record(identifier, record)
             self.job = job
             self._persist_job()
-            threading.Thread(target=self._run, args=(job, path, copy.deepcopy(draft)), daemon=True).start()
+            threading.Thread(target=self._run, args=(job, path, copy.deepcopy(post)), daemon=True).start()
             return {'job': copy.deepcopy(job)}
 
     def _progress(self, job, percent, stage):
@@ -414,12 +582,19 @@ class Publisher:
             self._persist_job()
             self._history_status(job)
 
+    def _instagram_checkpoint(self, job, *, container_id, publish_attempted):
+        with self.lock:
+            job.update(container_id=_instagram_id(container_id, 'media container ID'), publish_attempted=publish_attempted is True)
+            self._persist_job()
+            self._history_status(job)
+
     def _safe_error(self, error):
         message = str(error) if isinstance(error, ValueError) else 'Upload interrupted. Check your account before retrying.'
         for rows in self.vault.values():
             for row in rows.values():
                 for key in ('access_token', 'refresh_token', 'client_secret'):
                     if row.get(key): message = message.replace(row[key], '[redacted]')
+        message = re.sub(r'(?:EAA|IGAA)[A-Za-z0-9_-]{8,}', '[redacted]', message)
         message = re.sub(r'https?://\S+', '[provider URL]', message)
         return message[:600]
 
@@ -430,6 +605,9 @@ class Publisher:
             if job['platform'] == 'facebook_page':
                 result = facebook_publish(self.session, account, path, draft, progress,
                     checkpoint_callback=lambda **fields:self._checkpoint(job, **fields))
+            elif job['platform'] == 'instagram' and account.get('connection_type') == 'facebook':
+                result = instagram_local_publish(self.session, account, path, draft, progress,
+                    checkpoint_callback=lambda **fields:self._instagram_checkpoint(job, **fields))
             else:
                 adapter = youtube_upload if job['platform'] == 'youtube' else instagram_publish
                 result = adapter(self.session, account, path, draft, progress)
@@ -445,11 +623,59 @@ class Publisher:
                     job.update(remote_id=error.remote_id, publish_attempted=error.publish_attempted)
                 if isinstance(error, InstagramProcessingError):
                     job.update(container_id=error.container_id, processing_status=error.processing_status)
-                job.update(status='failed', stage='Upload failed', error=self._safe_error(error), finished=time.time())
+                if isinstance(error, InstagramPublishError):
+                    job.update(container_id=error.container_id, processing_status=error.processing_status, publish_attempted=error.publish_attempted)
+                if getattr(error, 'network_reason', None):
+                    job['network_reason'] = error.network_reason
+                page_token = job['platform'] == 'facebook_page' or job['platform'] == 'instagram' and self.vault['accounts'].get('instagram', {}).get('connection_type') == 'facebook'
+                reconnect = page_token and getattr(error, 'provider_code', None) == 190
+                if reconnect:
+                    account = self.vault['accounts'].get('facebook_page', {})
+                    account['needs_reconnect'] = True
+                    self._vault_save()
+                    job.update(reconnect_required=True, error_code=190,
+                               error_subcode=getattr(error, 'provider_subcode', None))
+                job.update(status='failed', stage='Reconnect Facebook Page' if reconnect else 'Upload failed',
+                           error=self._safe_error(ValueError(str(error) + ' ' + error.provider_message)
+                               if isinstance(error, (FacebookPublishError, InstagramPublishError)) and error.provider_message else error),
+                           finished=time.time())
         finally:
             with self.lock:
                 self._persist_job()
                 self._history_status(job)
+
+    def verify_instagram(self, identifier, job_id):
+        """Read a saved local-upload container; never publish or upload again."""
+        with self.lock:
+            self._idle()
+            record = self._record(identifier)
+            entry = next((row for row in record['history'] if row['id'] == job_id and row.get('platform') == 'instagram'), None)
+            if not entry or not entry.get('container_id') or entry.get('instagram_connection_type') != 'facebook':
+                raise ValueError('Choose an existing local Instagram upload from this project.')
+            account = self._access_account('instagram')
+            if account.get('connection_type') != 'facebook' or account.get('user_id') != entry.get('destination_id'):
+                raise ValueError('Reconnect the Instagram account used for this upload before checking it.')
+            status = instagram_container_status(self.session, account, entry['container_id'])
+            entry['processing_status'] = status
+            entry['checked_at'] = time.time()
+            if status == 'PUBLISHED':
+                entry.update(status='complete', error='', finished=time.time(),
+                    warning='Instagram confirmed publication. Check your profile for the Reel link.')
+                message = 'Instagram confirmed that this Reel is published. No new publish request was sent.'
+            elif status in ('ERROR', 'EXPIRED'):
+                entry['confirmed_unpublished'] = True
+                message = 'Instagram reports this upload as ' + status.lower() + '. It is safe to review the video and start a new upload.'
+            else:
+                message = 'Instagram has processed this upload; publication is still unconfirmed. Check again before retrying.' if status == 'FINISHED' else 'Instagram is still uploading or processing this video. Check again shortly.'
+            self._save_record(identifier, record)
+            if self.job and self.job.get('id') == job_id:
+                self.job.update(processing_status=status)
+                if status == 'PUBLISHED':
+                    self.job.update(status='complete', stage='Published', progress=100, error='', finished=entry['finished'], warning=entry['warning'])
+                elif status in ('ERROR', 'EXPIRED'):
+                    self.job['confirmed_unpublished'] = True
+                self._persist_job()
+            return {'ok':True, 'message':message}
 
     def verify_youtube(self, identifier, job_id, url):
         """Confirm an existing video through read-only API calls; never upload it."""
@@ -566,7 +792,7 @@ class Publisher:
                 entry.update(url=url, finished=time.time())
             else:
                 record['history'].append({'id': uuid.uuid4().hex, 'platform': platform, 'status': 'manual',
-                    'url': url, 'title': (record.get('draft') or self._default_draft(identifier))['title'],
+                    'url': url, 'title': self._platform_draft(record.get('draft') or self._default_draft(identifier), platform)['title'],
                     'created': time.time(), 'finished': time.time(), 'video_signature': video['signature'], 'method': 'manual'})
             self._save_record(identifier, record)
             return {'ok': True}

@@ -3,15 +3,25 @@
 Protocol: https://github.com/fbsamples/reels_publishing_apis/tree/main/fb_reels_publishing_api_sample
 """
 from pathlib import Path
+import json
+import os
+import shutil
+import subprocess
+from types import SimpleNamespace
+
+import requests
 import re
 import time
 from urllib.parse import urlsplit
 
-from publishing_clients import _caption, _progress, _token, request_json
+from publishing_clients import _caption, _progress, _token, request_json, _response_json, ProviderNetworkError
 
 FACEBOOK_API_VERSION = 'v26.0'
 FACEBOOK_POLL_TIMEOUT = 600
 FACEBOOK_POLL_INTERVAL = 5
+# urllib3 uses the connect timeout on the socket while sending the request body.
+# A video needs a larger write budget than the default 10-second API timeout.
+FACEBOOK_UPLOAD_TIMEOUT = (120, 600)
 
 
 def facebook_id(value, label='Page ID'):
@@ -55,16 +65,22 @@ def _upload_url(value, video_id):
 
 
 class FacebookPublishError(ValueError):
-    def __init__(self, message, remote_id, publish_attempted):
+    def __init__(self, message, remote_id, publish_attempted, provider_error=None):
         self.remote_id = remote_id
         self.publish_attempted = publish_attempted
+        self.provider_code = getattr(provider_error, 'provider_code', None)
+        self.provider_subcode = getattr(provider_error, 'provider_subcode', None)
+        self.provider_message = getattr(provider_error, 'provider_message', '')
+        self.network_kind = getattr(provider_error, 'network_kind', None)
+        self.network_reason = getattr(provider_error, 'network_reason', None)
         super().__init__(message)
 
 
 class _VideoReader:
     """Stream the file without buffering the complete MP4 in memory."""
-    def __init__(self, file, size, callback):
+    def __init__(self, file, size, callback, destination='Facebook Page'):
         self.file, self.size, self.callback = file, size, callback
+        self.destination = destination
 
     def __len__(self):
         return self.size
@@ -83,7 +99,7 @@ class _VideoReader:
         data = self.file.read(amount)
         if not data and amount:
             raise ValueError('The exported video changed during upload.')
-        _progress(self.callback, 5 + 60 * self.tell() / self.size, 'Uploading video to Facebook Page')
+        _progress(self.callback, 5 + 60 * self.tell() / self.size, 'Uploading video to ' + self.destination)
         return data
 
     def __iter__(self):
@@ -92,6 +108,68 @@ class _VideoReader:
             if not data:
                 return
             yield data
+
+
+
+def _curl_quote(value):
+    value = str(value)
+    if any(character in value for character in ('\r', '\n', '\0')):
+        raise ValueError('The Facebook upload configuration contains an invalid value.')
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def _curl_video_upload(executable, upload_url, token, video, total, destination='Facebook'):
+    # Keep the token out of process arguments and files. curl reads this config
+    # from stdin, streams the MP4, and receives early HTTP errors while sending.
+    config = '\n'.join([
+        'request = "POST"',
+        'url = ' + _curl_quote(upload_url),
+        'upload-file = ' + _curl_quote(video.resolve().as_posix()),
+        'header = ' + _curl_quote('Authorization: OAuth ' + token),
+        'header = "offset: 0"',
+        'header = ' + _curl_quote('file_size: ' + str(total)),
+        'header = ' + _curl_quote('Content-Length: ' + str(total)),
+        'header = "Content-Type: application/octet-stream"',
+        'write-out = "\\n%{http_code}"',
+    ]) + '\n'
+    command = [executable, '--disable', '--silent', '--show-error', '--globoff', '--proto', '=https',
+        '--connect-timeout', str(FACEBOOK_UPLOAD_TIMEOUT[0]), '--max-time', str(FACEBOOK_UPLOAD_TIMEOUT[1]),
+        '--speed-time', str(FACEBOOK_UPLOAD_TIMEOUT[0]), '--speed-limit', '1', '--config', '-']
+    try:
+        result = subprocess.run(command, input=config.encode('utf-8'), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=FACEBOOK_UPLOAD_TIMEOUT[1] + 15,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+    except subprocess.TimeoutExpired:
+        raise ProviderNetworkError('The ' + destination + ' video transfer timed out.', 'timeout') from None
+    except OSError:
+        raise ProviderNetworkError('The ' + destination + ' video transfer could not start.', 'request') from None
+    text = result.stdout.decode('utf-8', errors='replace').rstrip('\r\n')
+    body, separator, status = text.rpartition('\n')
+    if separator and re.fullmatch(r'[1-5]\d{2}', status):
+        # An HTTP rejection may arrive before the complete body is sent.
+        if result.returncode == 0 or int(status) >= 400:
+            return _response_json(SimpleNamespace(status_code=int(status), json=lambda: json.loads(body)))
+    if result.returncode:
+        reason = {28:'timeout', 35:'tls', 51:'tls_certificate', 60:'tls_certificate',
+                  55:'curl_send', 56:'curl_receive'}.get(result.returncode, 'connection')
+        kind = 'timeout' if reason == 'timeout' else 'connection'
+        raise ProviderNetworkError('The ' + destination + ' video transfer failed.', kind, reason)
+    raise ValueError(destination + ' returned an invalid upload response.')
+
+
+def _video_upload(session, upload_url, token, video, total, progress_callback, *, destination='Facebook Page'):
+    executable = shutil.which('curl.exe') if os.name == 'nt' and isinstance(session, requests.Session) else None
+    if executable:
+        _progress(progress_callback, 5, 'Uploading video to ' + destination + ' (' + str(round(total / (1024 * 1024), 1)) + ' MB)')
+        result = _curl_video_upload(executable, upload_url, token, video, total, destination)
+        if result.get('success') is True:
+            _progress(progress_callback, 65, destination + ' received the video')
+        return result
+    with video.open('rb') as file:
+        return request_json(session, 'POST', upload_url, headers={
+            'Authorization':'OAuth ' + token, 'offset':'0', 'file_size':str(total),
+            'Content-Length':str(total), 'Content-Type':'application/octet-stream',
+        }, data=_VideoReader(file, total, progress_callback, destination), timeout=FACEBOOK_UPLOAD_TIMEOUT)
 
 
 def facebook_status(session, account, video_id, *, owner=False):
@@ -138,11 +216,7 @@ def facebook_publish(session, account, path, draft, progress_callback, checkpoin
         if checkpoint_callback:
             checkpoint_callback(remote_id=video_id, publish_attempted=False)
         upload_url = _upload_url(created.get('upload_url'), video_id)
-        with video.open('rb') as file:
-            uploaded = request_json(session, 'POST', upload_url, headers={
-                'Authorization':'OAuth ' + token, 'offset':'0', 'file_size':str(total),
-                'Content-Length':str(total), 'Content-Type':'application/octet-stream',
-            }, data=_VideoReader(file, total, progress_callback))
+        uploaded = _video_upload(session, upload_url, token, video, total, progress_callback)
         if uploaded.get('success') is not True:
             raise ValueError('Facebook did not confirm receiving the video. No publish was requested.')
         _progress(progress_callback, 70, 'Publishing Reel to Facebook Page')
@@ -169,7 +243,16 @@ def facebook_publish(session, account, path, draft, progress_callback, checkpoin
         else:
             raise ValueError('Facebook publishing is still unconfirmed. Check the existing Reel before retrying.')
     except ValueError as error:
-        raise FacebookPublishError(str(error), video_id, publish_attempted) from None
+        message = str(error)
+        kind = getattr(error, 'network_kind', None)
+        if kind:
+            reason = getattr(error, 'network_reason', None)
+            problem = 'timed out' if kind == 'timeout' else 'was reset' if reason == 'connection_reset' else 'was interrupted'
+            if publish_attempted:
+                message = 'Facebook publishing could not be confirmed because the connection ' + problem + '. Use Check existing upload before trying again.'
+            else:
+                message = 'The Facebook video transfer ' + problem + '. No publish was requested. Check your connection and retry the upload.'
+        raise FacebookPublishError(message, video_id, publish_attempted, provider_error=error) from None
     link = facebook_permalink('', video_id)
     try:
         result = request_json(session, 'GET', api + '/' + video_id, headers=headers, params={'fields':'permalink_url'})

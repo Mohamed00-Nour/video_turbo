@@ -59,8 +59,16 @@ class PublishingTests(unittest.TestCase):
         return result, state
     def wait(self):
         deadline = time.monotonic() + 3
-        while self.app.running and time.monotonic() < deadline: time.sleep(.01)
-        self.assertFalse(self.app.running, 'Publishing worker did not finish')
+        while time.monotonic() < deadline:
+            snapshot = self.app.snapshot('project')
+            job = snapshot['job']
+            entry = next((row for row in snapshot['history'] if row['id'] == job['id']), None)
+            # Restart checks need the durable result, not just the worker's
+            # in-memory status before its final history write.
+            if job['status'] != 'running' and entry and entry['status'] == job['status']:
+                return
+            time.sleep(.01)
+        self.fail('Publishing worker did not persist its final result')
 
     def test_draft_and_protected_connection_survive_restart_without_exposing_secrets(self):
         self.configure()
@@ -76,6 +84,75 @@ class PublishingTests(unittest.TestCase):
             self.assertNotIn(secret, encoded)
             self.assertNotIn(secret, (self.root / 'data/publishing/accounts.json').read_text())
         self.assertEqual(restarted.vault['accounts']['youtube']['refresh_token'], 'PRIVATE_REFRESH_TOKEN')
+
+    def test_platform_overrides_persist_and_inherit_updated_shared_fields(self):
+        draft = {**self.draft, 'description': 'Shared caption', 'hashtags': '#shared',
+                 'platform_overrides': {'youtube': {'title': 'YouTube title'},
+                                        'instagram': {'description': 'Instagram caption', 'hashtags': ''}}}
+        self.app.save_draft('project', draft)
+        restarted = pub.Publisher(self.root / 'data', lambda key: self.project, session=Session())
+        loaded = restarted.snapshot('project')['draft']
+        self.assertEqual(loaded['platform_overrides']['instagram']['hashtags'], '')
+        self.assertEqual(loaded['platform_overrides']['youtube']['title'], 'YouTube title')
+        updated = restarted.save_draft('project', {**loaded, 'description': 'Updated shared', 'hashtags': 'new'})['draft']
+        youtube = restarted._platform_draft(updated, 'youtube')
+        instagram = restarted._platform_draft(updated, 'instagram')
+        self.assertEqual(youtube['title'], 'YouTube title')
+        self.assertEqual(youtube['description'], 'Updated shared')
+        self.assertEqual(youtube['hashtags'], '#new')
+        self.assertEqual(instagram['description'], 'Instagram caption')
+        self.assertEqual(instagram['hashtags'], '')
+        self.assertEqual(restarted._platform_draft(updated, 'tiktok')['description'], 'Updated shared')
+        restored = restarted.save_draft('project', {**updated, 'platform_overrides': {}})['draft']
+        self.assertEqual(restarted._platform_draft(restored, 'youtube')['title'], self.draft['title'])
+
+    def test_platform_overrides_reject_invalid_shapes_and_normalize_tags(self):
+        invalid = [[], {'unsupported': {}}, {'youtube': []}, {'youtube': {'privacy': 'public'}},
+                   {'youtube': {'title': 123}}, {'youtube': {'title': 'x' * 101}},
+                   {'instagram': {'description': 'x' * 5001}}, {'tiktok': {'hashtags': 'x' * 1501}}]
+        for overrides in invalid:
+            with self.subTest(overrides=type(overrides)):
+                with self.assertRaises(ValueError):
+                    self.app.save_draft('project', {**self.draft, 'platform_overrides': overrides})
+        saved = self.app.save_draft('project', {**self.draft,
+             'platform_overrides': {'tiktok': {'hashtags': 'gaming ##arabic'}, 'facebook': {}}})['draft']
+        self.assertEqual(saved['platform_overrides'], {'tiktok': {'hashtags': '#gaming #arabic'}})
+
+    def test_direct_upload_uses_platform_details_without_replacing_shared_draft(self):
+        draft = {**self.draft, 'description': 'Shared description', 'hashtags': '#shared',
+                 'platform_overrides': {'youtube': {'title': 'Custom upload title', 'description': 'Custom caption'}}}
+        with patch.object(pub, 'youtube_upload', return_value={'remote_id': 'custom-video'}) as adapter:
+            self.app.start('project', 'youtube', draft, True, self.signature)
+            self.wait()
+        sent = adapter.call_args.args[3]
+        self.assertEqual(sent['title'], 'Custom upload title')
+        self.assertEqual(sent['description'], 'Custom caption')
+        self.assertEqual(sent['hashtags'], '#shared')
+        self.assertNotIn('platform_overrides', sent)
+        saved = self.app.snapshot('project')
+        self.assertEqual(saved['draft']['title'], self.draft['title'])
+        self.assertEqual(saved['draft']['description'], 'Shared description')
+        self.assertEqual(saved['history'][0]['title'], 'Custom upload title')
+
+    def test_instagram_limit_applies_to_resolved_caption(self):
+        self.app.vault['accounts']['instagram'] = {'access_token': 'TEST_TOKEN', 'user_id': '123', 'name': '@test'}
+        draft = {**self.draft, 'description': 'x' * 3000,
+                 'instagram_video_url': 'https://cdn.example.com/video.mp4',
+                 'platform_overrides': {'instagram': {'description': 'Short caption'}}}
+        with patch.object(pub, 'instagram_publish', return_value={'remote_id': 'reel'}) as adapter:
+            self.app.start('project', 'instagram', draft, True, self.signature)
+            self.wait()
+        self.assertEqual(adapter.call_args.args[3]['description'], 'Short caption')
+        with self.assertRaisesRegex(ValueError, '2,200'):
+            self.app.start('project', 'instagram',
+                           {**draft, 'description': 'Short shared', 'platform_overrides': {'instagram': {'description': 'x' * 2201}}},
+                           True, self.signature)
+
+    def test_assisted_history_uses_platform_title(self):
+        self.app.save_draft('project', {**self.draft, 'platform_overrides': {'tiktok': {'title': 'TikTok title'}}})
+        self.app.mark('project', 'tiktok')
+        self.assertEqual(self.app.snapshot('project')['history'][0]['title'], 'TikTok title')
+        self.assertFalse(self.app.session.calls)
 
     def test_youtube_oauth_uses_state_pkce_and_exact_loopback_callback(self):
         result, state = self.authorize()

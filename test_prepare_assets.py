@@ -119,6 +119,61 @@ class GameplayPreparationTests(unittest.TestCase):
         self.assertEqual(self.download.call_count, 1)
         self.assertEqual(self.download.call_args.args[1], 360)
 
+    def test_starter_clips_are_trimmed_for_recording_without_network_and_stay_cached(self):
+        self.assertTrue(assets.prepare_gameplay(self.url, 20, self.game))
+        key=assets.source_cache_key(self.url)
+        starter_paths=[assets.clip_cache_path(key,start,20) for start in (150,360)]
+        self.fetch.reset_mock();self.download.reset_mock()
+        self.assertTrue(assets.prepare_gameplay(self.url, 7.5, self.game))
+        self.fetch.assert_not_called();self.download.assert_not_called()
+        self.assertEqual(self.cut.call_count,2)
+        for call in self.cut.call_args_list:
+            self.assertEqual(call.args[1:3],(0,7.5))
+        for path in starter_paths:self.assertEqual(float(path.read_text()),20)
+        for name in ('top.mp4','bottom.mp4'):self.assertEqual(float((self.game/name).read_text()),7.5)
+        self.cut.reset_mock()
+        self.assertTrue(assets.prepare_gameplay(self.url, 7.5, self.game))
+        self.cut.assert_not_called();self.fetch.assert_not_called();self.download.assert_not_called()
+        # An explanation can later grow without downloading again if the starter covers it.
+        self.assertTrue(assets.prepare_gameplay(self.url, 12, self.game))
+        self.assertEqual(self.cut.call_count,2);self.fetch.assert_not_called();self.download.assert_not_called()
+
+    def test_short_source_starters_trim_at_correct_relative_positions(self):
+        self.fetch.return_value={'duration':40}
+        self.assertTrue(assets.prepare_gameplay(self.url, 20, self.game))
+        self.fetch.reset_mock();self.download.reset_mock()
+        self.assertTrue(assets.prepare_gameplay(self.url, 7, self.game))
+        self.assertEqual([call.args[1] for call in self.cut.call_args_list],[0,4])
+        self.fetch.assert_not_called();self.download.assert_not_called()
+
+    def test_other_project_can_trim_starter_cache_without_network(self):
+        self.assertTrue(assets.prepare_gameplay(self.url, 20, self.game))
+        self.fetch.reset_mock();self.download.reset_mock()
+        other=self.root/'another_project'
+        self.assertTrue(assets.prepare_gameplay('https://youtu.be/sample', 6.8, other))
+        self.assertEqual(self.cut.call_count,2)
+        self.fetch.assert_not_called();self.download.assert_not_called()
+
+    def test_longer_recording_downloads_when_starter_is_not_long_enough(self):
+        self.assertTrue(assets.prepare_gameplay(self.url, 20, self.game))
+        self.download.reset_mock()
+        self.assertTrue(assets.prepare_gameplay(self.url, 25, self.game))
+        self.assertEqual(self.download.call_count,2);self.cut.assert_not_called()
+
+    def test_changed_source_does_not_trim_old_starter_cache(self):
+        self.assertTrue(assets.prepare_gameplay(self.url, 20, self.game))
+        self.download.reset_mock()
+        self.assertTrue(assets.prepare_gameplay('https://youtu.be/changed', 7.1, self.game))
+        self.assertEqual(self.download.call_count,2);self.cut.assert_not_called()
+
+    def test_broken_starter_cache_downloads_fresh_footage(self):
+        self.assertTrue(assets.prepare_gameplay(self.url, 20, self.game))
+        key=assets.source_cache_key(self.url)
+        for start in (150,360):assets.clip_cache_path(key,start,20).write_text('broken')
+        self.download.reset_mock()
+        self.assertTrue(assets.prepare_gameplay(self.url, 7.5, self.game))
+        self.assertEqual(self.download.call_count,2);self.cut.assert_not_called()
+
     def test_changed_duration_refreshes_generated_clips(self):
         self.assertTrue(assets.prepare_gameplay(self.url, 4, self.game))
         self.download.reset_mock()

@@ -382,14 +382,22 @@ def prepare_gameplay(url: str, clip_duration: float, game_dir: Path, info: dict 
                 write_json(metadata_path, {"duration": video_duration})
 
         top, bottom, duration = clip_ranges(video_duration, clip_duration)
+        starter_top, starter_bottom, starter_duration = clip_ranges(video_duration, DEFAULT_CLIP_DURATION)
         log(f"  Video length: {video_duration:.1f}s; clip duration: {duration:.1f}s")
         for i, (dest, start) in enumerate(zip(paths, [top, bottom])):
             if ready[i]:
                 log(f"  {dest.name} already exists, keeping it.")
                 continue
             cached = clip_cache_path(source_key, start, duration)
+            starter_start = (starter_top, starter_bottom)[i]
+            starter = clip_cache_path(source_key, starter_start, starter_duration)
+            offset = round(start - starter_start, 3)
             if clip_is_ready(cached, duration):
                 log(f"  Reusing cached {dest.name} ({start:.1f}s - {start + duration:.1f}s).")
+            elif offset >= 0 and offset + duration <= starter_duration and clip_is_ready(starter, starter_duration):
+                log(f"  Trimming prepared {dest.name} locally to {duration:.1f}s; no gameplay download needed.")
+                if not cut_clip(starter, offset, duration, cached):
+                    continue
             elif raw_video:
                 if not cut_clip(raw_video, start, duration, cached):
                     continue
@@ -510,7 +518,7 @@ def load_config() -> dict:
     return {}
 
 
-def run_preparation() -> int:
+def run_preparation(*, without_voiceover=False) -> int:
     failures = 0
     log(f"Starting asset preparation for: {PROJECT_PATH}")
     config  = load_config()
@@ -536,7 +544,7 @@ def run_preparation() -> int:
                 log(f"  Source available: {info.get('title', game['game_name'])}")
 
     # Estimate per-game clip durations from existing transcription (if available)
-    durations = estimate_game_durations(games)
+    durations = [DEFAULT_CLIP_DURATION] * len(games) if without_voiceover else estimate_game_durations(games)
 
     igdb_id, igdb_secret = get_igdb_credentials(config)
     igdb_available = bool(igdb_id and igdb_secret)
@@ -590,10 +598,11 @@ def run_preparation() -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Prepare gameplay clips and logos.")
     parser.add_argument("--project", type=Path, default=PROJECT_PATH, help="Video project folder")
+    parser.add_argument("--without-voiceover", action="store_true", help="Prepare starter clips while the voiceover is being recorded")
     args = parser.parse_args(argv)
     configure_project(args.project)
     try:
-        return run_preparation()
+        return run_preparation(without_voiceover=args.without_voiceover)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
         log(f"ERROR: {error}")
         return 1

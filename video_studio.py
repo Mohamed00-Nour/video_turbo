@@ -21,10 +21,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
-from pipeline_common import read_cache, write_json, voiceover_path
+from pipeline_common import read_cache, write_json, voiceover_path, fingerprint
 import video_sections as sections
 from ai_brief import parse_brief, image_url
 from publishing import Publisher
+from ai_generation import AIGenerator
+from ai_series import SeriesLibrary
 
 ENGINE = Path(__file__).resolve().parent
 WEB = ENGINE / 'studio'
@@ -37,12 +39,28 @@ class Studio:
     def __init__(self, data=DATA, projects=PROJECTS):
         self.data, self.projects = Path(data), Path(projects)
         self.registry = read_cache(self.data / 'studio_registry.json')
+        self.removed_projects = read_cache(self.data / 'studio_removed_projects.json')
         self.presets = read_cache(self.data / 'studio_presets.json')
         self.lock = threading.RLock()
         self.job = None
         self.process = None
         self.token = secrets.token_urlsafe(32)
         self.publisher = Publisher(self.data, self.project)
+        self.ai = AIGenerator(self.data)
+        self.series = SeriesLibrary(self.data)
+        saved_job = read_cache(self.data / 'ai' / 'job.json')
+        if saved_job:
+            self.job = saved_job
+            if saved_job.get('status') in ('running', 'cancelling'):
+                saved_job.update(status='interrupted', stage='AI workflow interrupted', finished=time.time(),
+                                 error='Studio restarted. Your script is saved; retry the interrupted step.')
+                if saved_job.get('project') in self.registry:
+                    path = self.project(saved_job['project']) / 'ai_workflow.json'
+                    workflow = read_cache(path)
+                    workflow.update(status='interrupted', error=saved_job['error'])
+                    write_json(path, workflow)
+                write_json(self.data / 'ai' / 'job.json', saved_job)
+
 
     def persist(self):
         write_json(self.data / 'studio_registry.json', self.registry)
@@ -61,12 +79,52 @@ class Studio:
     def register(self, path):
         path = Path(path).resolve()
         for key, value in self.registry.items():
-            if value['path'] == str(path):
+            if Path(value['path']) == path:
                 return key
+        if os.path.normcase(str(path)) in self.removed_projects:
+            self.removed_projects.pop(os.path.normcase(str(path)))
+            write_json(self.data / 'studio_removed_projects.json', self.removed_projects)
         identifier = uuid.uuid4().hex
-        self.registry[identifier] = {'path': str(path), 'name': path.name}
+        self.registry[identifier] = {'path': str(path), 'name': read_cache(path / 'studio.json').get('name') or path.name}
         self.persist()
         return identifier
+
+    def rename_project(self, identifier, name):
+        with self.lock:
+            self.idle()
+            if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80:
+                raise ValueError('Project name must contain 1 to 80 characters.')
+            path = self.project(identifier)
+            editor = self.load(identifier)['editor']
+            editor['name'] = name.strip()
+            write_json(path / 'studio.json', editor)
+            self.registry[identifier]['name'] = editor['name']
+            self.persist()
+            return self.load(identifier)
+
+    def managed_project(self, path):
+        return path.resolve().parent == self.projects.resolve()
+
+    def delete_project(self, identifier, confirmed=False):
+        with self.lock:
+            self.idle()
+            if confirmed is not True: raise ValueError('Confirm deletion before deleting the project.')
+            path = self.project(identifier)
+            trash = None
+            if self.managed_project(path) and path.is_dir():
+                trash = (self.data / 'deleted_projects' / identifier).resolve()
+                if not trash.is_relative_to(self.data.resolve()) or trash == path or trash.is_relative_to(path):
+                    raise ValueError('The project cannot be moved to this trash folder.')
+                trash.parent.mkdir(parents=True, exist_ok=True)
+                path.rename(trash)
+            self.removed_projects[os.path.normcase(str(path))] = {'name': self.registry[identifier]['name'], 'trash': str(trash) if trash else '', 'deleted_at': time.time()}
+            write_json(self.data / 'studio_removed_projects.json', self.removed_projects)
+            self.registry.pop(identifier)
+            self.persist()
+            if self.job and self.job.get('project') == identifier:
+                self.job = None
+                write_json(self.data / 'ai' / 'job.json', {})
+            return {'deleted': identifier, 'files_moved': bool(trash)}
 
     def create(self, name, preset='blank'):
         self.idle()
@@ -98,19 +156,21 @@ class Studio:
         parsed = parse_brief(raw)
         editor = parsed['editor']
         identifier = self.create(editor['name'], 'games')
-        result = self.save(identifier, editor)
+        self.save(identifier, editor)
         config_path = self.project(identifier) / 'config.json'
         config = read_cache(config_path)
         config['brief_sources'] = True
         write_json(config_path, config)
-        return result
+        write_json(self.project(identifier) / 'ai_workflow.json', self.workflow(identifier))
+        return self.load(identifier)
 
     def list_projects(self):
         # Discover existing video folders without modifying their contents.
         for path in ENGINE.parent.iterdir():
-            if path.is_dir() and (path / 'script.txt').is_file() and ((path / 'games').is_dir() or (path / 'studio.json').is_file()):
+            if os.path.normcase(str(path.resolve())) not in self.removed_projects and path.is_dir() and (path / 'script.txt').is_file() and ((path / 'games').is_dir() or (path / 'studio.json').is_file()):
                 self.register(path)
-        return [{'id': key, 'name': value['name'], 'path': value['path']} for key, value in self.registry.items() if Path(value['path']).is_dir()]
+        return [{'id': key, 'name': value['name'], 'path': value['path'], 'managed': self.managed_project(Path(value['path']))}
+                for key, value in self.registry.items() if Path(value['path']).is_dir() and os.path.normcase(value['path']) not in self.removed_projects]
 
     def media(self, path):
         files = []
@@ -144,10 +204,14 @@ class Studio:
         return {'id': identifier, 'path': str(path), 'editor': editor, 'media': self.media(path),
                 'voiceover': voice, 'music': (path / 'music.mp3').is_file(),
                 'background': (path / 'gta_background.mp4').is_file(),
-                'final': (path / 'output/final.mp4').is_file(), 'preview': (path / 'output/studio_preview.png').is_file()}
+                'final': (path / 'output/final.mp4').is_file(), 'preview': (path / 'output/studio_preview.png').is_file(),
+                'ai_workflow': self.workflow(identifier)}
 
-    def save(self, identifier, editor):
-        self.idle()
+    def save(self, identifier, editor, *, job_id=None):
+        if job_id is None:
+            self.idle()
+        elif not self.job or self.job.get('id') != job_id or self.job.get('project') != identifier or self.job.get('status') != 'running':
+            raise ValueError('The AI generation job changed; reload the project.')
         path = self.project(identifier)
         if not isinstance(editor, dict) or editor.get('mode') not in ('sections', 'games'):
             raise ValueError('Invalid project settings.')
@@ -217,7 +281,163 @@ class Studio:
         (path / 'script.txt').write_text(editor.get('script', ''), encoding='utf-8')
         self.registry[identifier]['name'] = editor.get('name') or path.name
         self.persist()
+        workflow = self.workflow(identifier)
+        imported_changed = workflow.get('source') == 'import' and workflow.get('prepared_inputs_hash') and workflow['prepared_inputs_hash'] != self.asset_inputs_hash(editor)
+        if job_id is None and (imported_changed or workflow.get('approved_script_hash') and workflow['approved_script_hash'] != fingerprint(editor.get('script', '').strip())):
+            workflow.update(status='awaiting_assets' if workflow.get('source') == 'import' else 'awaiting_review', approved_script_hash='', prepared_inputs_hash='', error='')
+            write_json(path / 'ai_workflow.json', workflow)
         return self.load(identifier)
+
+    def workflow(self, identifier):
+        path = self.project(identifier)
+        workflow = read_cache(path / 'ai_workflow.json')
+        config = read_cache(path / 'config.json')
+        if not workflow and config.get('brief_sources') and 'sections' not in config:
+            # Existing imports get the same preparation controls as new briefs.
+            return {'source': 'import', 'status': 'awaiting_assets', 'auto_build': True, 'error': ''}
+        return workflow
+
+    @staticmethod
+    def asset_inputs_hash(editor):
+        return fingerprint({'mode': editor['mode'], 'script': editor.get('script', '').strip(), 'games': editor.get('games', [])})
+
+    def prepare_imported_assets(self, identifier):
+        with self.lock:
+            self.idle()
+            workflow = self.workflow(identifier)
+            editor = self.load(identifier)['editor']
+            if workflow.get('source') != 'import' or editor['mode'] != 'games':
+                raise ValueError('Import an AI brief before preparing its assets.')
+            if not editor.get('script', '').strip() or not editor.get('games'):
+                raise ValueError('Provide your spoken script and game list before preparing assets.')
+            path = self.project(identifier)
+            workflow.update(status='preparing_assets', approved_script=editor['script'].strip(),
+                            approved_script_hash=fingerprint(editor['script'].strip()),
+                            prepared_inputs_hash=self.asset_inputs_hash(editor), auto_build=True, failed_step='', error='')
+            write_json(path / 'ai_workflow.json', workflow)
+            job = self._ai_job(identifier, 'ai_prepare', 'Preparing gameplay and logos')
+            threading.Thread(target=self.run, args=(job, path, read_cache(path / 'config.json'), 0), daemon=True).start()
+            return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
+
+    def _ai_job(self, identifier, action, stage):
+        job = {'id': uuid.uuid4().hex, 'project': identifier, 'action': action, 'status': 'running',
+               'stage': stage, 'progress': 0, 'logs': [], 'started': time.time(), 'cancel': False}
+        self.job = job
+        write_json(self.data / 'ai' / 'job.json', job)
+        return job
+
+    def create_ai(self, name, provider, idea, language, series_id=''):
+        self.idle()
+        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80: raise ValueError('Give the AI project a name of 1 to 80 characters.')
+        account = self.ai.account(provider)
+        if not isinstance(idea, str) or not 1 <= len(idea.strip()) <= 10000: raise ValueError('Describe your video idea in 1 to 10,000 characters.')
+        if not isinstance(language, str) or not 1 <= len(language.strip()) <= 100: raise ValueError('Choose the script language or dialect.')
+        if not isinstance(series_id, str): raise ValueError('Choose a saved series.')
+        context = self.series.context(series_id) if series_id else None
+        identifier = self.create(name, 'blank')
+        workflow = {'provider': provider, 'model': account['model'], 'idea': idea.strip(), 'language': language.strip(),
+                    'status': 'writing_script', 'approved_script_hash': '', 'auto_build': True, 'error': ''}
+        if context: workflow.update(series_id=series_id, series_context=context)
+        write_json(self.project(identifier) / 'ai_workflow.json', workflow)
+        job = self._ai_job(identifier, 'ai_script', 'Writing your script')
+        threading.Thread(target=self.run_ai, args=(job, account), daemon=True).start()
+        return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
+
+    def retry_ai(self, identifier):
+        self.idle()
+        workflow = self.workflow(identifier)
+        if not workflow or workflow.get('status') not in ('failed','cancelled','interrupted'): raise ValueError('There is no failed AI step to retry.')
+        if workflow.get('source') == 'import': return self.prepare_imported_assets(identifier)
+        account = self.ai.account(workflow['provider'])
+        if workflow.get('approved_script_hash'):
+            return self.approve_ai(identifier, self.load(identifier)['editor']['script'], True)
+        workflow.update(status='writing_script', model=account['model'], error='')
+        write_json(self.project(identifier) / 'ai_workflow.json', workflow)
+        job = self._ai_job(identifier, 'ai_script', 'Writing your script')
+        threading.Thread(target=self.run_ai, args=(job, account), daemon=True).start()
+        return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
+
+    def approve_ai(self, identifier, script, approved=False):
+        self.idle()
+        workflow = self.workflow(identifier)
+        if approved is not True: raise ValueError('Review and approve the script before preparing assets.')
+        if not workflow.get('outline'): raise ValueError('Generate a script before approving it.')
+        if workflow.get('status') not in ('awaiting_review','failed','cancelled','interrupted'):
+            raise ValueError('This script is already approved. Wait for preparation to finish.')
+        if not isinstance(script, str) or not 1 <= len(script.strip()) <= 100000: raise ValueError('Provide the complete script you reviewed.')
+        account = self.ai.account(workflow['provider'])
+        editor = self.load(identifier)['editor']; editor['script'] = script.strip()
+        self.save(identifier, editor)
+        workflow.update(status='finding_sources', approved_script_hash=fingerprint(script.strip()), approved_script=script.strip(), model=account['model'], error='')
+        write_json(self.project(identifier) / 'ai_workflow.json', workflow)
+        if workflow.get('series_id'):
+            self.series.record_approval(workflow['series_id'], identifier, editor['name'], workflow['idea'], script.strip(),
+                                        [game['exact_name'] for game in workflow['outline']['games']])
+        job = self._ai_job(identifier, 'ai_prepare', 'Finding gameplay and logos')
+        threading.Thread(target=self.run_ai, args=(job, account), daemon=True).start()
+        return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
+
+    def run_ai(self, job, account):
+        identifier = job['project']; path = self.project(identifier)
+        workflow = self.workflow(identifier)
+        try:
+            with self.lock:
+                if job['cancel']: return
+            if job['action'] == 'ai_script':
+                request = {k: workflow[k] for k in ('idea','language')}
+                if workflow.get('series_context'): request['series'] = workflow['series_context']
+                outline = self.ai.script(workflow['provider'], account, request)
+                with self.lock:
+                    if job['cancel']: return
+                    editor = self.load(identifier)['editor']; editor['script'] = outline['script']
+                    self.save(identifier, editor, job_id=job['id'])
+                    workflow.update(status='awaiting_review', outline=outline, error='')
+                    write_json(path / 'ai_workflow.json', workflow)
+                    job.update(status='complete', stage='Script ready for review', progress=100)
+            else:
+                script = self.load(identifier)['editor']['script'].strip()
+                options = {'series': workflow['series_context']} if workflow.get('series_context') else {}
+                brief, parsed = self.ai.brief(workflow['provider'], account, workflow['outline'], script, **options)
+                with self.lock:
+                    if job['cancel']: return
+                    editor = parsed['editor']; editor['name'] = self.registry[identifier]['name']
+                    brief['project_name'] = editor['name']
+                    self.save(identifier, editor, job_id=job['id'])
+                    config = read_cache(path / 'config.json'); config['brief_sources'] = True
+                    write_json(path / 'config.json', config); write_json(path / 'ai_brief.json', brief)
+                    if workflow.get('series_id'):
+                        self.series.record_approval(workflow['series_id'], identifier, editor['name'], workflow['idea'], script,
+                                                    [game['title'] for game in editor['games']])
+                    workflow.update(status='preparing_assets', warnings=parsed['warnings'], error='')
+                    write_json(path / 'ai_workflow.json', workflow)
+                    job.update(stage='Preparing gameplay and logos', progress=25)
+                self.run(job, path, config, 0)
+                return
+        except Exception as error:
+            # Do not echo arbitrary provider content or transport errors into logs.
+            message = str(error) if isinstance(error, ValueError) else 'AI generation failed. Your project is saved; retry the step.'
+            with self.lock:
+                workflow.update(status='failed', failed_step=job['action'], error=message); write_json(path / 'ai_workflow.json', workflow)
+                job.update(status='failed', stage='AI generation failed', error=message)
+        finally:
+            with self.lock:
+                if job['cancel']:
+                    job.update(status='cancelled', stage='Cancelled')
+                    workflow.update(status='cancelled', error=''); write_json(path / 'ai_workflow.json', workflow)
+                job['finished'] = time.time()
+                if self.job is job: write_json(self.data / 'ai' / 'job.json', job)
+
+    def maybe_auto_build(self, identifier):
+        with self.lock:
+            workflow = self.workflow(identifier)
+            if workflow.get('status') != 'assets_ready' or not workflow.get('auto_build'): return
+            if self.publisher.running or self.job and self.job.get('status') in ('running','cancelling'): return
+            try: voiceover_path(self.project(identifier))
+            except FileNotFoundError: return
+            editor = self.load(identifier)['editor']
+            if workflow.get('approved_script_hash') != fingerprint(editor['script'].strip()): return
+            if workflow.get('source') == 'import' and workflow.get('prepared_inputs_hash') != self.asset_inputs_hash(editor): return
+            self.start(identifier, 'build')
 
     def start(self, identifier, action, at=0):
         with self.lock:
@@ -227,6 +447,9 @@ class Studio:
             path = self.project(identifier)
             voiceover_path(path)
             config = read_cache(path / 'config.json')
+            workflow = self.workflow(identifier)
+            if workflow and workflow.get('source') != 'import' and (workflow.get('status') not in ('assets_ready','complete','rendering','failed','interrupted') or workflow.get('approved_script_hash') != fingerprint(self.load(identifier)['editor']['script'].strip())):
+                raise ValueError('Approve the current script and prepare its assets before building.')
             if 'sections' in config:
                 sections.validate_sections(config, path)
             elif not config.get('games') and not (path / 'games').is_dir():
@@ -237,17 +460,26 @@ class Studio:
             job = {'id': uuid.uuid4().hex, 'project': identifier, 'action': action, 'status': 'running',
                    'stage': 'Starting', 'progress': 0, 'logs': [], 'started': time.time(), 'cancel': False}
             self.job = job
+            if workflow and action == 'build':
+                if workflow.get('source') == 'import':
+                    editor = self.load(identifier)['editor']
+                    workflow.update(approved_script=editor['script'].strip(), approved_script_hash=fingerprint(editor['script'].strip()),
+                                    prepared_inputs_hash=self.asset_inputs_hash(editor))
+                workflow.update(status='rendering', error=''); write_json(path / 'ai_workflow.json', workflow)
+                write_json(self.data / 'ai' / 'job.json', job)
             threading.Thread(target=self.run, args=(job, path, config, float(at)), daemon=True).start()
             return copy.deepcopy(job)
 
     def run(self, job, path, config, at):
         commands = []
         if 'sections' not in config and (path / 'games.txt').is_file() and (path / 'games.txt').read_text('utf-8').strip():
-            commands.append([sys.executable, '-u', str(ENGINE / 'prepare_assets.py'), '--project', str(path)])
+            command = [sys.executable, '-u', str(ENGINE / 'prepare_assets.py'), '--project', str(path)]
+            if job['action'] == 'ai_prepare': command += ['--without-voiceover']
+            commands.append(command)
         command = [sys.executable, '-u', str(ENGINE / 'build_video.py'), '--project', str(path), '--no-preview']
         if job['action'] == 'preview':
             command += ['--preview-only', '--preview-at', str(at)]
-        commands.append(command)
+        if job['action'] != 'ai_prepare': commands.append(command)
         try:
             for command in commands:
                 with self.lock:
@@ -295,6 +527,13 @@ class Studio:
             with self.lock:
                 self.process = None
                 job['finished'] = time.time()
+                workflow = self.workflow(job['project'])
+                if workflow:
+                    status = ('assets_ready' if job['action'] == 'ai_prepare' else 'complete') if job['status'] == 'complete' else job['status']
+                    workflow.update(status=status, failed_step=job['action'] if job['status'] == 'failed' else '', error=job.get('error', ''))
+                    write_json(path / 'ai_workflow.json', workflow)
+                    write_json(self.data / 'ai' / 'job.json', job)
+            if job['action'] == 'ai_prepare' and job['status'] == 'complete': self.maybe_auto_build(job['project'])
 
     def cancel(self):
         with self.lock:
@@ -361,12 +600,23 @@ class Handler(BaseHTTPRequestHandler):
             if host not in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'):
                 self.json_response({'error': 'Use the localhost address.'}, 403); return
             if parsed.path == '/api/health':
-                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE)})
+                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series']})
             elif parsed.path == '/api/state':
                 with self.studio.lock:
                     self.json_response({'token': self.studio.token, 'projects': self.studio.list_projects(),
                                         'presets': list(self.studio.presets), 'job': self.studio.job,
                                         'publishing_job': self.studio.publisher.active_job()})
+            elif parsed.path == '/api/ai/settings':
+                with self.studio.lock: self.json_response(self.studio.ai.snapshot())
+            elif parsed.path == '/api/ai/series':
+                with self.studio.lock: self.json_response(self.studio.series.snapshot())
+            elif parsed.path == '/api/ai/brief':
+                with self.studio.lock:
+                    brief = read_cache(self.studio.project(query['id'][0]) / 'ai_brief.json')
+                    if not brief: raise ValueError('The generated JSON brief is not ready yet.')
+                    self.json_response(brief)
+            elif parsed.path == '/api/ai/workflow':
+                with self.studio.lock: self.json_response(self.studio.workflow(query['id'][0]))
             elif parsed.path == '/api/project':
                 with self.studio.lock: self.json_response(self.studio.load(query['id'][0]))
             elif parsed.path == '/api/job':
@@ -404,7 +654,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 name = parsed.path.lstrip('/') or 'index.html'
                 path = (WEB / name).resolve()
-                if not path.is_relative_to(WEB.resolve()) or path.suffix not in ('.html', '.css', '.js'):
+                if not path.is_relative_to(WEB.resolve()) or path.suffix not in ('.html', '.css', '.js', '.woff2'):
                     raise ValueError('Page not found.')
                 self.send_file(path)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -423,10 +673,12 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             if parsed.path == '/api/upload':
                 with self.studio.lock:
-                    self.studio.idle()
+                    role = query.get('role', ['media'])[0]
+                    preparation = self.studio.job and self.studio.job.get('action') == 'ai_prepare' and self.studio.job.get('status') == 'running' and self.studio.job.get('project') == query['id'][0]
+                    if role != 'voice' or not preparation: self.studio.idle()
+                    elif self.studio.publisher.running: raise ValueError('Wait for the publishing upload to finish.')
                     project = self.studio.project(query['id'][0])
                     name = Path(query['name'][0]).name; ext = Path(name).suffix.lower()
-                    role = query.get('role', ['media'])[0]
                     if ext not in UPLOAD_EXTS or not 0 < length <= 4 * 1024**3:
                         raise ValueError('Use a supported media file, up to 4 GB.')
                     if role == 'voice':
@@ -455,6 +707,7 @@ class Handler(BaseHTTPRequestHandler):
                                 old = project / ('voiceover' + suffix)
                                 if old != target: old.unlink(missing_ok=True)
                     finally: pending.unlink(missing_ok=True)
+                    if role == 'voice': self.studio.maybe_auto_build(query['id'][0])
                     self.json_response({'path': target.relative_to(project).as_posix(), 'project': self.studio.load(query['id'][0])})
                 return
             if length > 2 * 1024**2: raise ValueError('Request too large.')
@@ -462,12 +715,26 @@ class Handler(BaseHTTPRequestHandler):
             with self.studio.lock:
                 if parsed.path == '/api/create':
                     identifier = self.studio.create(data['name'], data.get('preset', 'blank')); result = self.studio.load(identifier)
+                elif parsed.path == '/api/ai/settings':
+                    self.studio.idle(); result = self.studio.ai.configure(data['provider'], data.get('model',''), data.get('api_key',''))
+                elif parsed.path == '/api/ai/series':
+                    self.studio.idle(); result = self.studio.series.save(data.get('id',''), data['name'], data.get('platform','any'),
+                                                                       data['instructions'], data.get('language','Egyptian Arabic'), data.get('reference_script',''))
+                elif parsed.path == '/api/ai/create':
+                    series_id = data.get('series_id','')
+                    default_language = self.studio.series.get(series_id)['language'] if series_id else 'Egyptian Arabic'
+                    result = self.studio.create_ai(data['name'], data.get('provider','gemini'), data['idea'], data.get('language',default_language), series_id)
+                elif parsed.path == '/api/ai/approve': result = self.studio.approve_ai(data['id'], data['script'], data.get('approved',False))
+                elif parsed.path == '/api/ai/retry': result = self.studio.retry_ai(data['id'])
                 elif parsed.path == '/api/brief/validate': result = parse_brief(data['brief'])
                 elif parsed.path == '/api/brief/import': result = self.studio.import_brief(data['brief'])
+                elif parsed.path == '/api/brief/prepare': result = self.studio.prepare_imported_assets(data['id'])
                 elif parsed.path == '/api/import':
                     self.studio.idle(); path = Path(data['path']).resolve()
                     if not path.is_dir() or not (path / 'script.txt').is_file(): raise ValueError('Choose an existing video folder containing script.txt.')
                     result = self.studio.load(self.studio.register(path))
+                elif parsed.path == '/api/project/rename': result = self.studio.rename_project(data['id'], data['name'])
+                elif parsed.path == '/api/project/delete': result = self.studio.delete_project(data['id'], data.get('confirmed', False))
                 elif parsed.path == '/api/save': result = self.studio.save(data['id'], data['editor'])
                 elif parsed.path == '/api/start': result = self.studio.start(data['id'], data['action'], data.get('at', 0))
                 elif parsed.path == '/api/cancel': result = self.studio.cancel()
@@ -481,6 +748,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.studio.idle(); result = self.studio.publisher.finish_oauth(data['platform'], data['redirect_url'])
                 elif parsed.path == '/api/publishing/token':
                     self.studio.idle(); result = self.studio.publisher.connect_token(data['platform'], data['access_token'], data.get('page_id', ''))
+                elif parsed.path == '/api/publishing/instagram-page':
+                    self.studio.idle(); result = self.studio.publisher.connect_instagram_page()
+                elif parsed.path == '/api/publishing/check-account':
+                    self.studio.idle(); result = self.studio.publisher.check_account(data['platform'])
                 elif parsed.path == '/api/publishing/disconnect':
                     self.studio.idle(); result = self.studio.publisher.disconnect(data['platform'])
                 elif parsed.path == '/api/publishing/start':
@@ -489,6 +760,8 @@ class Handler(BaseHTTPRequestHandler):
                               data.get('reviewed', False), data.get('video_signature', ''))
                 elif parsed.path == '/api/publishing/verify-youtube':
                     self.studio.idle(); result = self.studio.publisher.verify_youtube(data['id'], data['job_id'], data['url'])
+                elif parsed.path == '/api/publishing/verify-instagram':
+                    self.studio.idle(); result = self.studio.publisher.verify_instagram(data['id'], data['job_id'])
                 elif parsed.path == '/api/publishing/verify-facebook':
                     self.studio.idle(); result = self.studio.publisher.verify_facebook(data['id'], data['job_id'])
                 elif parsed.path == '/api/publishing/mark':
@@ -520,15 +793,29 @@ class StudioServer(ThreadingHTTPServer):
         super().server_bind()
 
 
-def running_studio(url):
+def running_studio(url, require_series=False):
     """Identify this studio without changing its projects or interrupting a job."""
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(url + '/api/health', timeout=2) as response:
             data = json.loads(response.read(8192))
         return (isinstance(data, dict) and data.get('app') == 'video-turbo-studio'
-                and isinstance(data.get('engine'), str) and Path(data['engine']).resolve() == ENGINE)
+                and isinstance(data.get('engine'), str) and Path(data['engine']).resolve() == ENGINE
+                and (not require_series or 'ai-series' in data.get('features', [])))
     except (OSError, ValueError, TypeError):
+        return False
+
+
+def running_studio_idle(url):
+    """Do not load a second Studio against the same data while an older one is working."""
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(url + '/api/state', timeout=2) as response:
+            data = json.loads(response.read(2 * 1024**2))
+        return (isinstance(data, dict)
+                and (data.get('job') or {}).get('status') not in ('running', 'cancelling')
+                and (data.get('publishing_job') or {}).get('status') not in ('running', 'cancelling'))
+    except (OSError, ValueError, TypeError, AttributeError):
         return False
 
 
@@ -537,17 +824,26 @@ def main():
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--no-browser', action='store_true')
     args = parser.parse_args()
-    url = f'http://127.0.0.1:{args.port}'
-    try:
-        server = StudioServer(('127.0.0.1', args.port), Handler)
-    except OSError as error:
-        if running_studio(url):
-            print(f'Video Turbo Studio is already running: {url}', flush=True)
-            if not args.no_browser:
-                webbrowser.open(url)
-            return 0
-        print(f'Cannot start the studio on port {args.port}: {error}. Use the already running studio, or choose another --port.', file=sys.stderr)
-        return 1
+    port = args.port
+    for attempt in range(2):
+        url = f'http://127.0.0.1:{port}'
+        try:
+            server = StudioServer(('127.0.0.1', port), Handler)
+            break
+        except OSError as error:
+            if running_studio(url, require_series=True):
+                print(f'Video Turbo Studio is already running: {url}', flush=True)
+                if not args.no_browser: webbrowser.open(url)
+                return 0
+            if attempt == 0 and running_studio(url):
+                if not running_studio_idle(url):
+                    print(f'An older Studio is still working or could not be checked: {url}. Finish its jobs and close its server before relaunching.', file=sys.stderr)
+                    return 1
+                port = port + 1 if port < 65535 else 0
+                print(f'An older Studio is running at {url}. Starting the updated Studio on another local port.', flush=True)
+                continue
+            print(f'Cannot start the studio on port {port}: {error}. Use the already running studio, or choose another --port.', file=sys.stderr)
+            return 1
     server.studio = Studio()
     url = f'http://127.0.0.1:{server.server_port}'
     print(f'Video Turbo Studio: {url}', flush=True)

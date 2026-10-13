@@ -1,0 +1,33 @@
+#create-dialog{width:620px;max-height:90dvh;overflow:auto}
+.ai-settings{margin-top:18px;border:1px solid var(--line);border-radius:18px;padding:16px;background:var(--surface)}
+.ai-settings summary{font-weight:600;color:var(--text)}
+.ai-series{margin:18px 0 22px}
+#ai-series-context[data-state="error"]{color:var(--danger)}
+.ai-series-picker{display:flex;align-items:end;gap:10px}
+.ai-series-picker .field{flex:1;min-width:0;margin:0}
+.ai-series-picker button{flex-shrink:0}
+.ai-series-settings{margin-top:12px;border:1px solid var(--line);border-radius:16px;padding:14px;background:var(--surface)}
+.ai-series-settings summary{font-weight:600;cursor:pointer}
+.ai-series-settings textarea{min-height:100px}
+.ai-series-settings .hint{margin:10px 0}
+.ai-series-episodes{padding-left:22px;margin:12px 0 0}
+.ai-series-episodes li{margin:0 0 12px;overflow-wrap:anywhere}
+.ai-series-episodes strong,.ai-series-episodes span{display:block}
+.ai-series-episodes span{color:var(--muted);font-size:13px}
+#ai-workflow-series{margin:10px 0 0;color:var(--text)}
+.ai-connection-feedback{margin:14px 0 0;padding:12px 14px;border:1px solid var(--strong-line);border-radius:12px;font-size:14px;line-height:1.5;overflow-wrap:anywhere}
+.ai-connection-feedback[data-state="success"]{color:var(--success);border-color:var(--success)}
+.ai-connection-feedback[data-state="error"]{color:var(--danger);border-color:var(--danger);background:var(--danger-bg)}
+.ai-workflow{border:1px solid var(--strong-line);border-radius:20px;background:var(--yellow-soft);padding:20px;margin-bottom:22px}
+.ai-workflow h3{margin:0;font-size:20px;letter-spacing:-.015em}
+#ai-workflow-status{font-weight:600;margin:12px 0 4px}
+#ai-workflow-note{margin:0;overflow-wrap:anywhere}
+.ai-workflow-steps{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+.ai-workflow-steps span{border:1px solid var(--line);border-radius:999px;padding:6px 11px;font-size:12px;color:var(--muted)}
+.ai-workflow-steps .done{color:var(--success);border-color:var(--success)}
+.ai-workflow-steps .current{background:var(--yellow);color:var(--on-yellow);border-color:var(--yellow);font-weight:600}
+.ai-workflow-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+.ai-workflow-actions button,#ai-save-settings{min-height:44px}
+#ai-approve{margin-left:auto}
+#ai-workflow-error:empty{display:none}
+@media(max-width:650px){.ai-series-picker{align-items:stretch;flex-direction:column}.ai-workflow{padding:16px}.ai-workflow-actions .primary{width:100%;margin-left:0}.ai-workflow h3{font-size:18px}}

@@ -96,6 +96,95 @@ class StudioTests(unittest.TestCase):
         self.assertIn('https://youtu.be/abc', (path / 'games.txt').read_text())
 
 
+class ProjectLibraryTests(unittest.TestCase):
+    setUp = StudioTests.setUp
+    def test_rename_preserves_script_media_config_and_folder(self):
+        identifier=self.studio.create('Old name');path=self.studio.project(identifier)
+        editor=self.studio.load(identifier)['editor'];editor['script']='Saved spoken script.'
+        self.studio.save(identifier,editor)
+        (path/'voiceover.wav').write_bytes(b'audio')
+        write_json(path/'ai_workflow.json',{'status':'assets_ready','auto_build':True})
+        config=(path/'config.json').read_bytes();workflow=(path/'ai_workflow.json').read_bytes()
+        project=self.studio.rename_project(identifier,'  New name  ')
+        self.assertEqual(project['editor']['name'],'New name')
+        self.assertEqual(project['editor']['script'],'Saved spoken script.')
+        self.assertEqual(self.studio.project(identifier),path)
+        self.assertEqual((path/'voiceover.wav').read_bytes(),b'audio')
+        self.assertEqual((path/'config.json').read_bytes(),config)
+        self.assertEqual((path/'ai_workflow.json').read_bytes(),workflow)
+        restarted=studio.Studio(self.root/'data',self.root/'projects')
+        self.assertEqual(restarted.registry[identifier]['name'],'New name')
+
+    def test_empty_game_draft_can_be_renamed_and_invalid_names_do_not_modify_it(self):
+        identifier=self.studio.create('Draft','games')
+        for name in ('',' '*3,'x'*81,None):
+            with self.assertRaises(ValueError):self.studio.rename_project(identifier,name)
+        project=self.studio.rename_project(identifier,'Renamed draft')
+        self.assertEqual(project['editor']['name'],'Renamed draft')
+        self.assertEqual(project['editor']['games'],[])
+
+    def test_delete_requires_confirmation_and_moves_managed_project_to_trash(self):
+        identifier=self.studio.create('Delete me');path=self.studio.project(identifier)
+        (path/'script.txt').write_text('Saved script');(path/'voiceover.wav').write_bytes(b'audio')
+        other=self.studio.create('Keep me');other_path=self.studio.project(other)
+        with self.assertRaisesRegex(ValueError,'Confirm'):self.studio.delete_project(identifier)
+        self.assertTrue(path.exists())
+        self.studio.job={'project':identifier,'status':'complete'}
+        result=self.studio.delete_project(identifier,True)
+        self.assertTrue(result['files_moved']);self.assertFalse(path.exists())
+        trash=self.studio.data/'deleted_projects'/identifier
+        self.assertEqual((trash/'script.txt').read_text(),'Saved script')
+        self.assertEqual((trash/'voiceover.wav').read_bytes(),b'audio')
+        self.assertTrue(other_path.exists());self.assertIsNone(self.studio.job)
+        with self.assertRaisesRegex(ValueError,'not found'):self.studio.load(identifier)
+        restarted=studio.Studio(self.root/'data',self.root/'projects')
+        self.assertNotIn(identifier,restarted.registry);self.assertIsNone(restarted.job)
+
+    def test_external_delete_stays_removed_after_discovery_restart_and_can_be_reopened(self):
+        engine=self.root/'engine';engine.mkdir()
+        external=self.root/'Imported';external.mkdir();(external/'script.txt').write_text('Keep this script')
+        write_json(external/'studio.json',{'name':'Saved title','mode':'games','games':[]})
+        identifier=self.studio.register(external)
+        before={p.name:p.read_bytes() for p in external.iterdir() if p.is_file()}
+        result=self.studio.delete_project(identifier,True)
+        self.assertFalse(result['files_moved'])
+        with patch.object(studio,'ENGINE',engine):
+            self.assertNotIn(identifier,[p['id'] for p in self.studio.list_projects()])
+            restarted=studio.Studio(self.root/'data',self.root/'projects')
+            self.assertFalse(restarted.list_projects())
+        self.assertEqual({p.name:p.read_bytes() for p in external.iterdir() if p.is_file()},before)
+        reopened=restarted.register(external)
+        self.assertEqual(restarted.registry[reopened]['name'],'Saved title')
+        self.assertTrue(restarted.list_projects())
+
+    def test_active_build_and_publishing_block_rename_and_delete(self):
+        identifier=self.studio.create('Keep me');path=self.studio.project(identifier)
+        for owner in ('studio','publisher'):
+            with self.subTest(owner=owner):
+                job={'status':'running','project':identifier}
+                if owner=='studio':self.studio.job=job
+                else:self.studio.publisher.job=job
+                with self.assertRaises(ValueError):self.studio.rename_project(identifier,'New name')
+                with self.assertRaises(ValueError):self.studio.delete_project(identifier,True)
+                self.assertTrue(path.exists());self.assertIn(identifier,self.studio.registry)
+                self.studio.job=None;self.studio.publisher.job=None
+
+    def test_project_root_and_nested_imports_are_never_moved_as_managed_projects(self):
+        for path in (self.studio.projects,self.studio.projects/'container'/'nested'):
+            with self.subTest(path=path):
+                path.mkdir(parents=True,exist_ok=True);(path/'script.txt').write_text('Keep')
+                identifier=self.studio.register(path)
+                self.assertFalse(self.studio.delete_project(identifier,True)['files_moved'])
+                self.assertTrue(path.exists())
+
+    def test_failed_trash_move_keeps_project_registered(self):
+        identifier=self.studio.create('Keep me')
+        with patch.object(Path,'rename',side_effect=OSError('Folder is in use')):
+            with self.assertRaises(OSError):self.studio.delete_project(identifier,True)
+        self.assertIn(identifier,self.studio.registry)
+        self.assertTrue(self.studio.project(identifier).exists());self.assertFalse(self.studio.removed_projects)
+
+
 class HttpTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
@@ -126,6 +215,27 @@ class HttpTests(unittest.TestCase):
         with patch.object(studio.sys, 'argv', ['video_studio.py', '--port', str(self.server.server_port), '--no-browser']), patch.object(studio, 'StudioServer', side_effect=OSError('port occupied')), patch.object(studio.webbrowser, 'open') as browser, redirect_stdout(io.StringIO()):
             self.assertEqual(studio.main(), 0)
         browser.assert_not_called()
+
+    def test_older_idle_server_starts_updated_studio_on_another_port(self):
+        replacement = unittest.mock.MagicMock(server_port=8766)
+        replacement.serve_forever.side_effect = KeyboardInterrupt
+        with patch.object(studio.sys, 'argv', ['video_studio.py']), patch.object(studio, 'StudioServer', side_effect=[OSError('port occupied'), replacement]) as servers, patch.object(studio, 'running_studio', side_effect=[False, True]), patch.object(studio, 'running_studio_idle', return_value=True), patch.object(studio, 'Studio', return_value=self.app), patch.object(studio.webbrowser, 'open') as browser, redirect_stdout(io.StringIO()) as output:
+            self.assertIsNone(studio.main())
+        self.assertEqual(servers.call_args_list[1].args[0], ('127.0.0.1',8766))
+        browser.assert_called_once_with('http://127.0.0.1:8766')
+        self.assertIn('updated Studio', output.getvalue())
+
+    def test_older_busy_server_does_not_start_another_studio_or_change_jobs(self):
+        job={'id':'busy','status':'running'}; self.app.job=job
+        with patch.object(studio.sys, 'argv', ['video_studio.py']), patch.object(studio, 'StudioServer', side_effect=OSError('port occupied')) as servers, patch.object(studio, 'running_studio', side_effect=[False, True]), patch.object(studio, 'running_studio_idle', return_value=False), patch.object(studio, 'Studio') as create, patch.object(studio.webbrowser, 'open') as browser, redirect_stderr(io.StringIO()):
+            self.assertEqual(studio.main(), 1)
+        create.assert_not_called(); browser.assert_not_called(); self.assertEqual(servers.call_count,1)
+        self.assertIs(self.app.job,job)
+
+    def test_next_launch_reuses_the_updated_server_on_the_fallback_port(self):
+        with patch.object(studio.sys, 'argv', ['video_studio.py']), patch.object(studio, 'StudioServer', side_effect=OSError('port occupied')), patch.object(studio, 'running_studio', side_effect=[False,True,True]), patch.object(studio, 'running_studio_idle', return_value=True), patch.object(studio, 'Studio') as create, patch.object(studio.webbrowser, 'open') as browser, redirect_stdout(io.StringIO()):
+            self.assertEqual(studio.main(),0)
+        create.assert_not_called(); browser.assert_called_once_with('http://127.0.0.1:8766')
 
     def test_occupied_port_for_other_application_remains_an_error(self):
         with patch.object(studio.sys, 'argv', ['video_studio.py']), patch.object(studio, 'StudioServer', side_effect=OSError('port occupied')), patch.object(studio, 'running_studio', return_value=False), patch.object(studio.webbrowser, 'open') as browser, redirect_stderr(io.StringIO()) as output:
@@ -173,6 +283,18 @@ class HttpTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as error:
             self.request('/api/brief/import', payload, token=False)
         self.assertEqual(error.exception.code, 403)
+
+    def test_project_rename_and_delete_http_validate_token_confirmation_and_missing_id(self):
+        for route,payload in (('/api/project/rename',{'id':self.identifier,'name':'New name'}),('/api/project/delete',{'id':self.identifier,'confirmed':True})):
+            with self.assertRaises(urllib.error.HTTPError) as error:self.request(route,json.dumps(payload).encode(),token=False)
+            self.assertEqual(error.exception.code,403)
+        with self.request('/api/project/rename',json.dumps({'id':self.identifier,'name':'Renamed HTTP'}).encode()) as response:
+            self.assertEqual(json.load(response)['editor']['name'],'Renamed HTTP')
+        with self.assertRaises(urllib.error.HTTPError):self.request('/api/project/delete',json.dumps({'id':self.identifier}).encode())
+        self.assertTrue(self.app.project(self.identifier).exists())
+        with self.request('/api/project/delete',json.dumps({'id':self.identifier,'confirmed':True}).encode()) as response:
+            self.assertEqual(json.load(response)['deleted'],self.identifier)
+        with self.assertRaises(urllib.error.HTTPError):self.request('/api/project/delete',json.dumps({'id':self.identifier,'confirmed':True}).encode())
 
     def test_upload_and_video_range_round_trip(self):
         with self.request(f'/api/upload?id={self.identifier}&name=screen.mp4&role=media', b'0123456789') as response:

@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import requests
+import ssl
 
 REQUEST_TIMEOUT = (10, 90)
 YOUTUBE_CHUNK_SIZE = 1024 * 1024
@@ -41,6 +42,45 @@ def _progress(callback, percent, stage):
         callback(max(0, min(100, int(percent))), stage)
 
 
+class ProviderNetworkError(ValueError):
+    """Safe network failure details without token-bearing exception text."""
+    def __init__(self, message, kind, reason=None):
+        self.network_kind = kind
+        self.network_reason = reason or kind
+        super().__init__(message)
+
+
+def _network_reason(error):
+    # Socket failures are often nested in ConnectionError/ProtocolError.
+    # Keep only fixed diagnostic labels, never exception messages or URLs.
+    pending, seen, reason = [error], set(), 'connection'
+    tls_reasons = {
+        'UNEXPECTED_EOF_WHILE_READING': 'tls_eof',
+        'DECRYPTION_FAILED_OR_BAD_RECORD_MAC': 'tls_record',
+        'SSLV3_ALERT_BAD_RECORD_MAC': 'tls_record',
+        'CERTIFICATE_VERIFY_FAILED': 'tls_certificate',
+    }
+    while pending:
+        item = pending.pop()
+        if not isinstance(item, BaseException) or id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, (requests.Timeout, TimeoutError)):
+            return 'timeout'
+        code = getattr(item, 'winerror', None) or getattr(item, 'errno', None)
+        if code in (104, 10054):
+            reason = 'connection_reset'
+        elif code in (103, 10053) and reason == 'connection':
+            reason = 'connection_aborted'
+        elif code in (32, 10058) and reason == 'connection':
+            reason = 'broken_pipe'
+        if isinstance(item, (requests.exceptions.SSLError, ssl.SSLError)):
+            reason = tls_reasons.get(getattr(item, 'reason', None), 'tls')
+        pending.extend(arg for arg in item.args if isinstance(arg, BaseException))
+        pending.extend((item.__cause__, item.__context__, getattr(item, 'reason', None)))
+    return reason
+
+
 def _request(session, method, url, **kwargs):
     kwargs.setdefault("timeout", REQUEST_TIMEOUT)
     # Never forward an authorization header to a redirected request.
@@ -48,23 +88,47 @@ def _request(session, method, url, **kwargs):
     try:
         return session.request(method, url, **kwargs)
     except requests.Timeout:
-        raise ValueError("The provider network request timed out.") from None
-    except requests.ConnectionError:
-        raise ValueError("The connection to the provider was interrupted.") from None
+        raise ProviderNetworkError("The provider network request timed out.", 'timeout') from None
+    except requests.ConnectionError as error:
+        reason = _network_reason(error)
+        if reason == 'timeout':
+            raise ProviderNetworkError("The provider network request timed out.", 'timeout') from None
+        raise ProviderNetworkError("The connection to the provider was interrupted.", 'connection', reason) from None
     except requests.RequestException:
         # requests exceptions often contain token-bearing URLs.
-        raise ValueError("The provider network request failed.") from None
+        raise ProviderNetworkError("The provider network request failed.", 'request') from None
+
+
+class ProviderRequestError(ValueError):
+    """Credential-safe provider status and numeric codes for recovery."""
+    def __init__(self, message, status_code, code=None, subcode=None, provider_message=''):
+        self.status_code = status_code
+        self.provider_code = code
+        self.provider_subcode = subcode
+        self.provider_message = provider_message
+        super().__init__(message)
 
 
 def _provider_error(response, payload=None):
     """Return useful status/codes without echoing provider text or credentials."""
     suffix = []
+    code = subcode = None
+    provider_message = ''
     if isinstance(payload, dict):
         error = payload.get("error")
         if isinstance(error, dict):
+            if isinstance(error.get('message'), str):
+                provider_message = error['message'][:2000]
             code = error.get("code")
             if isinstance(code, int) and not isinstance(code, bool):
                 suffix.append("code " + str(code))
+            else:
+                code = None
+            subcode = error.get("error_subcode")
+            if isinstance(subcode, int) and not isinstance(subcode, bool):
+                suffix.append("subcode " + str(subcode))
+            else:
+                subcode = None
             reasons = error.get("errors", [])
             if isinstance(reasons, list):
                 for item in reasons:
@@ -73,7 +137,12 @@ def _provider_error(response, payload=None):
                         suffix.append(reason)
                         break
     detail = " (" + ", ".join(suffix) + ")" if suffix else ""
-    return ValueError("Provider request failed with HTTP " + str(response.status_code) + detail + ".")
+    if code == 190:
+        reason = "has expired" if subcode == 463 else "is invalid or has been revoked"
+        message = "This account's access token " + reason + detail + ". Reconnect the account with a fresh access token."
+    else:
+        message = "Provider request failed with HTTP " + str(response.status_code) + detail + "."
+    return ProviderRequestError(message, response.status_code, code, subcode, provider_message)
 
 
 def _response_json(response):

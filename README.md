@@ -58,8 +58,11 @@ remove it when changing that URL before its first managed preparation.
 When a voiceover is present, asset preparation transcribes it once and uses the
 same timing planner as the builder, including Arabic and multiword `spoken_names`.
 The builder then reuses that transcription. Without a voiceover, preparation
-falls back to 20-second clips; rerun after adding the voiceover to adjust generated
-clip lengths. A failed preparation exits with a nonzero status.
+falls back to 20-second clips. After adding the voiceover, generated clips are
+adjusted to the recording: when a cached starter clip covers the required section,
+Studio trims it locally and preserves the starter cache, avoiding a second gameplay
+download. Longer sections, changed sources or missing/broken cache files can still
+require downloading footage. A failed preparation exits with a nonzero status.
 
 For IGDB logo downloads, provide `IGDB_CLIENT_ID` and `IGDB_CLIENT_SECRET` as environment variables. Keep credentials out of committed configuration files.
 
@@ -189,21 +192,115 @@ python -m unittest -v test_video_studio.py test_pipeline.py test_prepare_assets.
 ```
 
 
+## Automatic AI projects
+
+**New video** defaults to **AI script & assets**, using **Google Gemini**.
+OpenAI and Anthropic Claude are also available in the provider selector. Choose
+**Manual layout** for the existing editor, or **Import JSON brief** to keep the
+manual JSON workflow.
+
+1. In the creation dialog, open **AI connection settings**, get an API key from
+   the selected provider, paste it, and click **Save AI connection**. Model IDs
+   can be changed if your account uses another compatible model. A message below
+   the save button shows saving, success, or a save error. Saving stores the key
+   locally; it does not verify the key or model with the provider. Saved keys are
+   protected with Windows DPAPI for your Windows account; responses never return
+   them to the browser. This uses the provider API and its quota or billing.
+2. Enter a project name, game-series video idea and script language/dialect,
+   then click **Create project**. The script has no fixed target length; the
+   finished video follows the duration of your recorded voiceover.
+3. Studio generates and saves the spoken script first. **No gameplay research,
+   asset download or rendering starts before script approval.** Edit the script
+   in **Voice & script**, and copy or download it for recording.
+4. Click **Approve script & prepare assets**. Studio researches gameplay and
+   optional logo sources, validates the JSON brief, saves `ai_brief.json`, and
+   starts the existing asset preparer in the background. **Download JSON brief**
+   exports the generated brief. Source availability is checked by preparation;
+   AI-selected footage still needs your visual review for relevance.
+5. Record and upload the voiceover while assets prepare. Uploading voiceover is
+   allowed for that project during preparation; other project changes remain
+   locked. Starter clips are prepared without reading the voiceover, avoiding
+   a race with recording uploads. Final preparation uses the real recording to
+   calculate clip lengths and caption timing.
+6. When assets and voiceover are both ready, Studio automatically starts one
+   video build. Review its finished MP4 and publish using the platform cards.
+   Social publishing remains an explicit action.
+
+Changing the approved script clears approval. Failed or interrupted AI steps
+keep the project and script; use the visible retry action after resolving the
+provider or source problem. Cancellation never automatically starts the next
+step. Settings and workflow checkpoints are local, under `output/ai/` and each
+project's `ai_workflow.json`; API keys are excluded from project exports.
+
+To keep a repeatable format, choose **New series** in the creation dialog. Give
+it a name such as **PC games** or **Mobile games**, choose its game platform and
+default dialect, and paste your initial writing prompt into **Series
+instructions**. You can paste a reference script too. Click **Save series**, or
+create the first episode to save the settings automatically.
+
+For later episodes, select that series and enter **Create one more episode** or
+a specific topic in **This episode's idea**. Each series keeps its own
+instructions, reference script and approved game history. Approving a script
+saves it as the latest reference; successful asset research updates the game
+list to the actual approved brief. Earlier game names and summaries of the ten
+most recent approved episodes help the AI avoid repetition. You can inspect
+recent episodes and edit the series instructions or reference in **Series
+instructions & reference**. Changes apply to new episodes; retries use the
+context saved when their project was created.
+
+Choose **Standalone video (no series)** for a single video. It sends only that
+video's idea and dialect and does not read or update series memory. Series are
+saved locally in `output/ai/series.json`; the selected series context is sent
+with script requests to the chosen provider. This is independent of ChatGPT
+chat history and works with any of the supported providers.
+
+Series are available before generating the first video. If **New series** is
+disabled and Studio reports an older server version, close the running Studio
+server and launch `start_studio.cmd` again to load the new backend. **Retry
+loading series** checks the server again without clearing the video idea.
+The launcher detects an older idle server and starts the updated Studio on the
+next local port instead of reopening the old backend. Later launches reuse that
+updated server. It leaves active generation or publishing jobs alone.
+
+Provider implementations use the official [Gemini Interactions API](https://ai.google.dev/gemini-api/docs/interactions-overview),
+[OpenAI Responses API](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses),
+and [Claude Messages API](https://platform.claude.com/docs/en/build-with-claude/structured-outputs).
+
+## Project library actions
+
+Open the three-dot menu beside a project in the left sidebar. **Edit project**
+opens its workspace and lets you rename it without discarding unsaved edits.
+**Delete project** shows a confirmation and removes the entry from the library.
+Projects stored directly in Studio's `projects/` folder are moved to the
+recoverable `output/deleted_projects/<project-id>/` folder. Projects opened from
+other folders keep their original files. Removed entries stay removed after
+restart and automatic discovery; **Open existing folder** can add an external
+folder again. Rename and delete are blocked while a build, preparation or upload
+is running.
+
 ## Optional AI brief import
 
-Both workflows remain available. **New video** opens the manual editor for any
-subject. **Import AI brief** creates a separate Game series project from a JSON
+Both workflows remain available. **New video ? Manual layout** opens the manual editor for any
+subject. **Import JSON brief** creates a separate Game series project from a JSON
 brief; it never replaces the project currently open. Every imported field can
 be edited with the same manual controls, and uploaded media takes priority.
 
-1. Click **Import AI brief**, then **Copy AI prompt**. Replace the idea, games and
-   target length before sending the prompt to your AI. The prompt asks the AI to
+1. Click **Import JSON brief**, then **Copy AI prompt**. Replace the idea and games
+   before sending the prompt to your AI. The prompt asks the AI to
    browse and verify gameplay sources, keep asset metadata outside the spoken
    script, and use null when a direct logo image is unavailable.
 2. Paste its JSON or choose a local `.json` file. **Check brief** validates the
    structure, names, aliases and URL formats and shows a review before creation.
-3. Click **Create project**, upload your recorded voiceover, then preview/build.
-   The recorded words must match the imported script for accurate captions.
+3. Click **Create project**. Your spoken script and game list are saved, and
+   **Prepare assets** is available in **Voice & script**, including on older imports.
+4. Click **Prepare assets** to prepare gameplay and logos while you record. No
+   voiceover or provider API key is needed for this step. You can upload your
+   voiceover while preparation runs; other editing is locked during the job.
+5. Studio starts one video build automatically when both assets and voiceover
+   are ready, regardless of which finishes first. **Build video** remains available
+   for manual builds, including preparing assets as part of a build. The recorded
+   words must match the imported script for accurate captions. Editing the script
+   or game sources requires fresh preparation before automatic building.
 
 The standard import format is:
 
@@ -266,15 +363,18 @@ script. The editor and command-line build workflow remain available.
 | Destination | Available workflow |
 | --- | --- |
 | YouTube | Direct MP4 upload after Google app setup and channel connection; private, unlisted or public visibility. |
-| Instagram Professional | Direct Reel publishing after Meta app setup/account connection, using a publicly hosted HTTPS URL for the finished MP4. Assisted upload is also available. |
+| Instagram Professional | Direct local MP4 publishing through the professional account linked to your Facebook Page. Existing Instagram Login connections can still publish from public HTTPS video links. Assisted upload is also available. |
 | TikTok | Download the MP4, copy the caption, open TikTok's uploader and finish posting there. |
 | Facebook Page | Direct local MP4 upload and confirmed Reel publishing after connecting a Page access token; no public video URL is required. |
 | Facebook personal profile | Download the MP4, copy the caption, open Facebook's Reel creator and finish posting there. |
 
-For a direct upload, select the destination and its options, watch the preview,
-check the review box, then click **Upload to YouTube** or **Publish Instagram
-Reel** or **Publish Facebook Page Reel**. Each click starts one upload. Changing posting options or the finished
-file clears the review. A completed upload of the same file to the same platform
+For a direct upload, open the platform card and click **Review & upload**.
+The review controls appear inside that card with its posting details selected.
+Watch the preview, check the review box, then click **Upload to YouTube**,
+**Publish Instagram Reel** or **Publish Facebook Page Reel** in the card.
+Each click starts one upload, and its progress appears in that platform card.
+Switching destinations or changing posting options or the finished file clears
+the review. A completed upload of the same file to the same platform
 is blocked to prevent duplicate posts. Facebook Page uploads track the connected
 Page ID, so publishing the same video to a different Page is allowed.
 
@@ -320,35 +420,43 @@ and [YouTube upload documentation](https://developers.google.com/youtube/v3/docs
 
 ### Connect Instagram
 
-Your account must be **Professional** (Business or Creator). This integration
-uses **Instagram API with Instagram Login**, which does not require a Facebook
-Page. Create/configure a Meta app with Instagram Login and enable
-`instagram_business_basic` and `instagram_business_content_publish`.
+Your Instagram account must be **Professional** (Business or Creator). For
+local MP4 uploads, link it to the Facebook Page you connected in Studio.
 
-For your own account during development, add/authorize the account in your
-Meta app's Instagram setup. You can paste the app-generated Instagram access
-token into the token connection field and click **Connect with token**. Studio
-checks the account identity before saving it. Tokens must carry publishing
-permission; generating a token alone does not grant additional permissions.
+1. Enable Instagram access through **Facebook Login for Business** in your
+   Meta app and authorize your professional Instagram account.
+2. When generating the Facebook token, include `instagram_basic`,
+   `instagram_content_publish`, and `pages_read_engagement`, in addition to
+   the permissions needed for Facebook Page publishing. Adding permissions
+   requires generating a fresh token; an existing token does not gain them.
+3. Reconnect the Facebook Page with the updated token in **Account setup**.
+4. In the Instagram card, click **Connect from Facebook Page**. Studio reads
+   the linked account and its publishing eligibility before saving the connection.
 
-Alternatively, save the Instagram app ID, app secret and a registered HTTPS
-OAuth redirect URL, then click **Connect account**. Finish Instagram sign-in
-and paste the full completed redirect URL into the panel's callback field.
-The URL must match the redirect used for that sign-in and contain its code and
-state. Studio validates the state and exchanges the code for account access.
-The registered redirect is separate from the local Studio address.
+After this one-time setup, Studio sends each finished MP4 directly to Meta.
+The public video URL field is hidden. Review the local video, caption, hashtags,
+and feed-sharing setting, then click **Publish Instagram Reel**. The Facebook
+Page token remains protected in the local credential vault; Instagram references
+that connection so refreshing the Page token also updates local Instagram access.
 
-For direct Reels publishing, host **this finished MP4** at a public HTTPS URL
-that Meta can download without a login, then paste it into **Public video URL**.
-A local disk path, localhost address, or Studio download URL will not work.
-Studio does not host the video publicly. If you do not want public hosting, use
-the panel's download/copy/open Instagram workflow. **Share to Instagram feed**
-controls the Instagram feed, not Facebook sharing. Instagram fetches/processes
-the video before the publish request; the panel shows that stage.
+Studio saves the media container before transferring the file and records the
+publish attempt before submitting it. If publication is uncertain, use
+**Check existing upload** in posting history. This sends only a status request
+and prevents a duplicate publish. Reconnect the original account to check its
+previous uploads. **Also show this Reel on my Instagram feed** controls the
+Instagram feed; it does not publish another copy to Facebook.
 
-See [Meta's Instagram API documentation](https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api)
-for account roles, app review requirements, permissions and media limitations.
-Connecting other people's accounts can require additional platform approval.
+The setup panel also retains **Alternative: Instagram Login with a hosted
+video**. This uses `instagram_business_basic` and
+`instagram_business_content_publish`, an Instagram access token or OAuth
+connection, and a public HTTPS URL for the finished MP4. Existing connections
+continue to use that method until you connect through the Facebook Page.
+Studio does not publicly host your video. Assisted download/copy/open Instagram
+publishing remains available.
+
+See [Meta's official local Instagram upload sample](https://github.com/fbsamples/reels_publishing_apis/tree/main/insta_reels_publishing_api_sample)
+for the container/upload/publish flow, and [Meta's content publishing guide](https://developers.facebook.com/docs/instagram-platform/content-publishing/)
+for account roles, permissions, and app review requirements.
 
 ### Connect a Facebook Page
 
@@ -409,3 +517,42 @@ they do not upload to real accounts:
 ```powershell
 python -m unittest -v test_publishing.py test_facebook_publishing.py
 ```
+
+## Studio themes and platform posting details
+
+The workspace uses a warm ivory, charcoal and yellow light theme and a matching
+dark theme. Use the theme switch in the top bar; your choice is remembered on
+this browser. The project overview shows real voiceover, script, section and
+media counts. Section cards expand individually to keep the editor focused.
+
+In **Publish video**, the first card contains shared title, description and
+hashtags. Every platform inherits these values. Open a platform card and edit
+a field to customize only that field for that destination. Other fields keep
+following the shared details. **Use shared** clears a field override; **Reset
+all to shared** clears that platform's overrides. Save posting details to keep
+the shared text and all overrides with the project.
+
+YouTube, Instagram and Facebook Page direct uploads use the selected card's
+resolved posting details. Caption counts include hashtags and show the existing
+YouTube and Instagram limits. Assisted-upload caption copying and local posting
+history also use the relevant platform card. Review the selected destination
+and its final text before starting an upload.
+
+The interface uses locally bundled Source Sans 3 and IBM Plex Sans Arabic fonts. Font
+licenses are included under `studio/ui-fonts/`.
+
+If Facebook rejects a Page token with code 190, Studio marks the connection as
+**Reconnect required** and stops further uploads with that token. **Check
+connection** performs only a Page identity read. Generate a fresh **Page access
+token** in Meta Graph API Explorer, paste it into the Facebook Page account
+setup, and select **Connect Page**. After reconnecting, review the destination
+and posting details again before uploading. If a failed upload already has a
+remote video ID and may have reached publishing, check that existing upload
+in posting history before creating another copy.
+
+Facebook Page connection also accepts a User token with access to the intended
+Page. If Meta identifies the token as a User token, Studio reads the managed
+Pages, matches the entered Page ID, and validates the returned Page token before
+saving. Multiple Pages require an explicit Page ID; Studio never selects another
+Page when the intended one is unavailable. Connection errors include Meta's
+field or permission explanation with tokens and provider URLs redacted.
