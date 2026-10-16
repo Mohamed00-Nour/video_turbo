@@ -1,5 +1,7 @@
 import React from "react";
 import timelineData from "./timeline.json";
+import {scenePalette} from "./reference/visualStyle";
+import {CaptionWords, textDirection} from "./captionText";
 
 interface WordData {
   word: string;
@@ -11,11 +13,12 @@ interface WordData {
 
 interface CaptionProps {
   currentFrame: number;
+  timeline?: typeof timelineData;
 }
 
-export const Caption: React.FC<CaptionProps> = ({ currentFrame }) => {
+export const Caption: React.FC<CaptionProps> = ({ currentFrame, timeline=timelineData }) => {
   // Determine if captions should be displayed at this frame
-  const { blocks, words } = timelineData;
+  const { blocks, words } = timeline;
 
   // Find which block we are currently in
   let currentBlock: any = null;
@@ -31,7 +34,7 @@ export const Caption: React.FC<CaptionProps> = ({ currentFrame }) => {
 
   if (!currentBlock || currentBlock.captions === false) return null;
 
-  if (currentBlock.type === "game" && timelineData.captionsInGameBlocks === false) {
+  if (currentBlock.type === "game" && timeline.captionsInGameBlocks === false) {
     return null;
   }
 
@@ -50,6 +53,28 @@ export const Caption: React.FC<CaptionProps> = ({ currentFrame }) => {
   }
 
   if (!activeWord) return null;
+
+  if (currentBlock.layout === 'reference_style') {
+    const style = currentBlock.referenceStyle;
+    const localWords = (words as WordData[]).filter(w => w.endFrame > currentBlock.startFrame && w.startFrame < currentBlock.startFrame + currentBlock.durationFrames);
+    const index = localWords.findIndex(w => w === activeWord);
+    if (index < 0) return null;
+    const group = style.caption_style === 'word' ? [activeWord] : localWords.slice(Math.floor(index / 4) * 4, Math.floor(index / 4) * 4 + 4);
+    if(style.renderer_version >= 2){
+      const palette=scenePalette(style,currentBlock);
+      const age=Math.min(1,Math.max(0,(currentFrame-activeWord.startFrame)/3));
+      return <div dir={textDirection(group.map(word=>word.word).join(' '))} style={{position:'absolute',left:85,right:85,top:(currentBlock.captionY ?? style.caption_y)*1920,textAlign:'center',fontFamily:'ReferencePlex, sans-serif',fontWeight:700,fontSize:style.caption_style==='word'?68:54,lineHeight:1.55,zIndex:50,translate:`0px ${(1-age)*8}px`}}>
+        <div style={{display:'inline-block',maxWidth:'100%',padding:'7px 22px',borderRadius:12,background:palette.background+'e8',boxShadow:palette.dark?'0 8px 30px #0003':'0 8px 25px #00000008'}}>
+          <CaptionWords words={group} wordStyle={i=>({color:group[i]===activeWord?palette.ink:palette.muted,margin:'0 7px',borderBottom:group[i]===activeWord?`3px solid ${style.accent}`:'3px solid transparent',paddingBottom:3})}/>
+        </div>
+      </div>;
+    }
+    return <div dir={textDirection(group.map(word=>word.word).join(' '))} style={{position:'absolute',left:100,right:100,top:style.caption_y*1920,textAlign:'center',fontFamily:'ReferencePlex, Lalezar, sans-serif',fontWeight:700,fontSize:53,lineHeight:1.6,zIndex:50}}>
+      <div style={{display:'inline-block',maxWidth:'100%',padding:'8px 18px',borderRadius:20,backgroundColor:style.background+'ed',boxShadow:'0 8px 24px #00000008'}}>
+      <CaptionWords words={group} wordStyle={i=>({color:group[i]===activeWord?style.accent:style.ink,opacity:group[i].startFrame > currentFrame ? .45 : 1,margin:'0 7px'})}/>
+      </div>
+    </div>;
+  }
 
   // Calculate popup scale animation over 6 frames: 0.6 -> 1.12 -> 1.0
   const frameSinceWordStart = Math.max(0, currentFrame - activeWord.startFrame);
@@ -112,10 +137,13 @@ export const Caption: React.FC<CaptionProps> = ({ currentFrame }) => {
             y={yCenter}
             textAnchor="middle"
             dominantBaseline="central"
-            direction="rtl"
+            direction={textDirection(activeWord.word)}
+            lang={textDirection(activeWord.word)==='ltr'?'en':undefined}
             filter="url(#caption-glow)"
             style={{
-              fontFamily: "Lalezar, sans-serif",
+              fontFamily: textDirection(activeWord.word)==='ltr'?"Arial, sans-serif":"Lalezar, sans-serif",
+              fontWeight: textDirection(activeWord.word)==='ltr'?700:undefined,
+              unicodeBidi: "isolate",
               fontSize: "90px",
               fill: "#FFFFFF",
               stroke: "#FD40FF",

@@ -3,10 +3,29 @@ from pathlib import Path
 import math
 from pipeline_common import normalize_text
 
-LAYOUTS = {'background', 'single', 'split', 'title', 'cyber_breach', 'thermal_meltdown', 'zero_ransom'}
+LAYOUTS = {'background', 'single', 'split', 'title', 'cyber_breach', 'thermal_meltdown', 'zero_ransom', 'reference_style'}
 VIDEO_EXTS = {'.mp4', '.mov', '.mkv', '.webm'}
 IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp'}
 BACKGROUND_NAMES = {'gta_background.mp4', 'roblox.mp4', 'fortnite.mp4'}
+REFERENCE_VARIANTS = ('hero', 'card', 'collage', 'type', 'device', 'compare', 'metric', 'steps')
+REFERENCE_DIRECTION = {
+    'scene_tone': ('base', 'contrast', 'accent'),
+    'backdrop': ('clean', 'grid', 'orbits', 'spotlight', 'diagonal'),
+    'motif': ('none', 'warning', 'connection', 'privacy', 'protection', 'energy', 'share'),
+    'media_treatment': ('photo', 'cutout', 'multiply'),
+    'text_position': ('top', 'center', 'bottom'),
+    'accent_style': ('text', 'block', 'underline'),
+    'transition_style': ('cut', 'wipe', 'settle'),
+}
+
+
+def validate_reference_direction(scene):
+    for key, choices in REFERENCE_DIRECTION.items():
+        if key in scene and scene[key] not in choices: raise ValueError('Unsupported reference ' + key + '.')
+    details = scene.get('details', [])
+    if not isinstance(details, list) or len(details) > 3 or any(not isinstance(value, str) or len(value) > 50 for value in details):
+        raise ValueError('Use up to three short supporting details in a reference scene.')
+
 
 
 def media_path(project, relative):
@@ -32,6 +51,15 @@ def validate_sections(config, project):
         layout = section.get('layout', 'single')
         if layout not in LAYOUTS:
             raise ValueError(f'Unknown section layout: {layout}')
+        if layout == 'reference_style':
+            if not config.get('reference_style'):
+                raise ValueError('Analyze a reference before using reference-style scenes.')
+            variant = section.get('variant', 'card')
+            if variant not in REFERENCE_VARIANTS:
+                raise ValueError('Choose a supported reference scene composition.')
+            validate_reference_direction(section)
+            if variant in ('hero', 'card', 'collage', 'compare') and not section.get('media'):
+                raise ValueError('Add media to the reference scene, or choose expressive typography.')
         for key in ('media', 'secondary_media'):
             if section.get(key):
                 media_path(project, section[key])
@@ -97,6 +125,18 @@ def section_starts(sections, words, duration, fps=30):
     return starts
 
 
+def reference_detail_frames(section, words, start, duration, fps):
+    tokens=[(token,round(float(word['start'])*fps)) for word in words for token in normalize_text(word['word']).split()
+            if start <= round(float(word['start'])*fps) < start+duration]
+    delays=[]
+    for index, detail in enumerate(section.get('details', [])):
+        phrase=normalize_text(detail).split()
+        matches=[tokens[i][1]-start for i in range(len(tokens)-len(phrase)+1)
+                 if phrase and [token[0] for token in tokens[i:i+len(phrase)]]==phrase]
+        delays.append(matches[0] if matches else min(round(index*.22*fps),max(0,duration-1)))
+    return delays
+
+
 def make_timeline(config, project, public, words, duration, probe, fps=30):
     sections = validate_sections(config, project)
     starts = section_starts(sections, words, duration, fps)
@@ -117,9 +157,10 @@ def make_timeline(config, project, public, words, duration, probe, fps=30):
         background = section.get('background', 'gta_background.mp4')
         if not (Path(public) / background).is_file():
             background = 'gta_background.mp4'
+        reference = section.get('layout') == 'reference_style'
         block = {**section, 'type': 'section', 'startFrame': starts[i],
                  'durationFrames': starts[i + 1] - starts[i], 'bgVideo': background,
-                 'bgDurationFrames': frames(background), 'gtaOffset': 0.8 + i * 3.4,
+                 'bgDurationFrames': 1 if reference else frames(background), 'gtaOffset': 0.8 + i * 3.4,
                  'captionY': float(section.get('caption_y', .76)), 'captions': section.get('captions', True)}
         for key in ('media', 'secondary_media'):
             if section.get(key):
@@ -129,6 +170,10 @@ def make_timeline(config, project, public, words, duration, probe, fps=30):
                               'durationFrames': frames(relative) if video else None}
             else:
                 block[key] = None
+        if reference:
+            block['referenceStyle'] = config.get('reference_style', {})
+            block['variant'] = section.get('variant', 'card')
+            block['detailFrames'] = reference_detail_frames(section, words, starts[i], starts[i+1]-starts[i], fps)
         blocks.append(block)
     processed = [{'word': w['word'], 'start': w['start'], 'end': w['end'],
                   'startFrame': round(w['start'] * fps),

@@ -6,12 +6,12 @@
  let seriesList=[],seriesLoaded=false,seriesRequest=null;
  const seriesDrafts = {};
  const phases = {
-  awaiting_assets:['Your script and game list are ready','Click Prepare assets, then record your voiceover while Studio prepares gameplay and logos. Upload the recording to build automatically when both are ready, or use Build video.'],
+  awaiting_assets:['Your script and game list are ready','Click Prepare assets, then upload a recording or choose ElevenLabs below. Studio builds when the assets and voiceover are ready.'],
   writing_script:['Writing your script','The script comes first. Assets will wait until you approve it.'],
   awaiting_review:['Your script is ready to review','Edit the spoken script below, then approve it. You can copy or download it for recording.'],
-  finding_sources:['Finding gameplay and logos','Your script is approved. Record your voiceover now; Studio is finding sources for the asset brief.'],
-  preparing_assets:['Preparing your assets','Record and upload your voiceover while gameplay clips and logos are prepared.'],
-  assets_ready:['Assets ready','Upload your voiceover. Studio will align the recording and build your video automatically.'],
+  finding_sources:['Finding gameplay and logos','Your script is approved. Studio is finding asset sources. Your selected voiceover source will be used when the assets are ready.'],
+  preparing_assets:['Preparing your assets','Gameplay clips and logos are being prepared. ElevenLabs can generate your selected voiceover after this step.'],
+  assets_ready:['Assets ready','Upload a voiceover, or choose an ElevenLabs voice and generate it below. Studio will align the audio and build your video.'],
   rendering:['Building your video','Your assets and voiceover are ready. Studio is aligning captions and rendering the finished MP4.'],
   complete:['Your video is ready','Preview the finished video, then open Publishing when you are ready to post.'],
   failed:['A step needs attention','Your project and script are saved. Check the message below and retry the step.'],
@@ -142,7 +142,7 @@
   if($('ai-workflow').hidden) return;
   const imported=workflow.source==='import';
   const changed=Boolean(workflow.approved_script && workflow.approved_script!==$('script').value.trim()) || imported && app.getState().dirty;
-  $('ai-workflow-heading').textContent=imported ? 'Prepare assets while you record.' : 'Script first. Your voice next.';
+  $('ai-workflow-heading').textContent=imported ? 'Prepare assets and your voiceover.' : 'Script first. Your voice next.';
   const [title,note]=phases[changed?(imported?'awaiting_assets':'awaiting_review'):workflow.status] || ['AI workflow','Review your script before recording.'];
   $('ai-workflow-status').textContent=title; $('ai-workflow-note').textContent=note;
   const review=workflow.status==='awaiting_review' || changed;
@@ -202,14 +202,14 @@
   }
  });
  $('ai-approve').onclick=()=>action(async()=>{
-  await app.save();
+  await app.save();await window.VideoTurboVoice?.saveSelection();
   const result=await app.api('/api/ai/approve',{id:app.getState().project.id,script:$('script').value,approved:true});
   await apply(result);app.toast('Script approved. Prepare your voiceover while Studio prepares the assets.');
  });
  $('ai-prepare-assets').onclick=()=>action(async()=>{
-  await app.save();
+  await app.save();await window.VideoTurboVoice?.saveSelection();
   await apply(await app.api('/api/brief/prepare',{id:app.getState().project.id}));
-  app.toast('Preparing assets. Record and upload your voiceover while Studio works.');
+  app.toast('Preparing assets. Studio will use your selected voiceover source when ready.');
  });
  $('ai-retry').onclick=()=>action(async()=>{
   const state=app.getState();
@@ -228,7 +228,7 @@
   async create() {await action(async()=>{
    const language=$('ai-language').value;
    if($('ai-series').value==='__new__' || seriesDrafts[$('ai-series').value]) await saveSeries();
-   const result=await app.api('/api/ai/create',{name:$('new-name').value,provider:$('ai-provider').value,idea:$('ai-idea').value,language,series_id:$('ai-series').value});
+   const result=await app.api('/api/ai/create',{name:$('new-name').value,provider:$('ai-provider').value,idea:$('ai-idea').value,language,series_id:$('ai-series').value,voice_source:$('new-voice-source').value});
    await apply(result);app.toast('Writing your script first. Assets wait for your approval.');
   });},
   update,lock,

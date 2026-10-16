@@ -57,6 +57,22 @@ class CaptionAlignmentTests(unittest.TestCase):
         })
         self.assertEqual(aligned[-1]["start"], 5.0)
 
+    def test_mixed_script_keeps_english_spelling_even_when_asr_is_arabic(self):
+        script = "\u0627\u0633\u062a\u062e\u062f\u0645 USB-C \u0636\u062f (Juice Jacking) \u0645\u0639 Data Blocker."
+        expected = ["\u0627\u0633\u062a\u062e\u062f\u0645", "USB-C", "\u0636\u062f", "Juice", "Jacking", "\u0645\u0639", "Data", "Blocker"]
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "script.txt").write_text(script, encoding="utf-8-sig")
+            with patch.object(build, "PROJECT_PATH", root):
+                tokens = build.load_script_tokens()
+        self.assertEqual(tokens, expected)
+        # The recording may pronounce English phonetically. ASR text must never
+        # replace the spelling supplied by the author.
+        heard = ["\u0627\u0633\u062a\u062e\u062f\u0645", "\u064a\u0648\u0627\u0633\u0628\u064a", "\u0636\u062f", "\u062c\u0648\u0633", "\u062c\u0627\u0643\u064a\u0646\u062c", "\u0645\u0639", "\u062f\u0627\u062a\u0627", "\u0628\u0644\u0648\u0643\u0631"]
+        aligned = self.align(tokens, [{"word":word,"start":i*.5,"end":i*.5+.4} for i,word in enumerate(heard)], 4.2)
+        self.assertEqual([word["word"] for word in aligned], expected)
+        self.assertTrue(all(0 <= word["start"] < word["end"] <= 4.2 for word in aligned))
+
     def test_direct_matches_keep_original_timestamps(self):
         words = [
             {"word": "one", "start": 0.1, "end": 0.5},

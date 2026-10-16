@@ -33,25 +33,38 @@ class PublicImageRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(request, response, code, message, headers, newurl)
 
 
-def fetch_logo(url, destination):
-    from PIL import Image
+def fetch_image(url, destination, *, max_pixels=16000000, max_side=None, label='Logo'):
+    from PIL import Image, ImageOps
     public_image_url(url)
     opener = urllib.request.build_opener(PublicImageRedirect())
     request = urllib.request.Request(url, headers={'User-Agent': 'VideoTurbo/1.0', 'Accept': 'image/*'})
     with opener.open(request, timeout=25) as response:
         length = response.headers.get('Content-Length')
         if length and int(length) > MAX_LOGO_BYTES:
-            raise ValueError('Logo image exceeds 12 MB.')
+            raise ValueError(label + ' image exceeds 12 MB.')
         payload = response.read(MAX_LOGO_BYTES + 1)
     if len(payload) > MAX_LOGO_BYTES:
-        raise ValueError('Logo image exceeds 12 MB.')
+        raise ValueError(label + ' image exceeds 12 MB.')
     with warnings.catch_warnings():
         warnings.simplefilter('error', Image.DecompressionBombWarning)
         with Image.open(io.BytesIO(payload)) as image:
-            if image.width * image.height > 16000000:
-                raise ValueError('Logo image is too large; use an image below 16 megapixels.')
+            if image.width * image.height > max_pixels:
+                raise ValueError(f'{label} image is too large; use an image below {max_pixels // 1000000} megapixels.')
+            # JPEG draft decoding reduces memory before the full image is loaded.
+            if max_side: image.draft('RGB', (max_side, max_side))
             image.load()  # Reject HTML, truncated downloads and invalid images.
-            image.convert('RGBA').save(destination, format='PNG')
+            prepared = ImageOps.exif_transpose(image) if max_side else image
+            if max_side: prepared.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+            prepared.convert('RGBA').save(destination, format='PNG')
+
+
+def fetch_logo(url, destination):
+    fetch_image(url, destination)
+
+
+def fetch_reference_image(url, destination):
+    # Accept normal camera photographs, but bound decoding and renderer memory.
+    fetch_image(url, destination, max_pixels=64000000, max_side=2560, label='Reference')
 
 
 def prepare_logo(url, game_dir, log=print, manual=False):

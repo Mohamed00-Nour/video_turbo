@@ -5,10 +5,13 @@ import { FlashTransition } from './FlashTransition';
 import { CyberBreachScene } from './CyberBreachScene';
 import { ThermalMeltdownScene } from './ThermalMeltdownScene';
 import { ZeroRansomScene } from './ZeroRansomScene';
+import { ReferenceStyleScene } from './ReferenceStyleScene';
 
 type Media = { src: string; kind: string; durationFrames?: number };
 export const SectionBlock: React.FC<{ block: any; blur: number }> = ({ block, blur }) => {
   const frame = useCurrentFrame();
+
+  if (block.layout === 'reference_style') return <ReferenceStyleScene block={block}/>;
 
   if (block.layout === 'cyber_breach') {
     return (

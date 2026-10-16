@@ -13,6 +13,62 @@ npm ci --prefix code
 
 The first transcription downloads the faster-whisper `large-v3` model and runs on the CPU. Model downloads and optional asset downloads require internet access.
 
+
+### ElevenLabs voiceovers in every workflow
+
+You can generate narration from your script using your own ElevenLabs voice in
+manual layouts (including game series), AI scripts and saved series, imported
+JSON briefs, Reference Styles, and existing projects.
+
+1. Create your voice clone in ElevenLabs. Open **ElevenLabs voice settings** in
+   Studio's sidebar and save your ElevenLabs API key. Enable Text to Speech,
+   Voices: Read, and Models: Read. The key is protected with Windows DPAPI and is
+   never sent to the browser or included in project files.
+2. Load your account's voices and available narration models, then save a default
+   voice and model. Saving or refreshing settings does not generate paid audio.
+3. Choose **Generate with ElevenLabs** when creating a project, or change
+   **Voiceover source** in any project's **Voice & script** panel. Select the voice,
+   model and supported delivery settings there. The script character count and
+   model request limit are shown before generation.
+4. Use **Generate voiceover** to save an MP3 and listen in the existing audio
+   player, or **Generate voiceover & build** to continue through the normal video
+   pipeline. Reference Styles generates audio before analyzing and planning the
+   new scenes. Imported briefs prepare their supplied asset links before rendering.
+5. AI-generated scripts still need your approval. With ElevenLabs selected, the
+   approved AI/series workflow or imported-brief preparation can generate the
+   selected voiceover and build automatically once assets are ready.
+
+Speech generation consumes your ElevenLabs account's allowance. MP3 output uses
+44.1 kHz / 128 kbps, compatible with Starter. The model list comes from ElevenLabs;
+realtime-only WebSocket models are excluded. Narration models use their reported
+per-request limits. Delivery controls follow model support; speed is unavailable
+for Eleven v3 and v4. Longer scripts must use a model with a sufficient
+limit or be shortened. No script text is rewritten for speech generation.
+
+Matching generated audio is reused when script, voice and delivery settings are
+unchanged. Retrying a video render does not regenerate speech. **Generate again**
+explicitly requests another version and consumes allowance again. Failed downloads
+or invalid audio leave the current voiceover intact. Generated takes and prior MP3s
+are kept in `voiceover-history/`; only validated audio replaces `voiceover.mp3`.
+The normal caption alignment and renderer use that saved MP3. Cancelling stops the
+local generation/build process, but a request already accepted by ElevenLabs may
+still consume allowance. There are no automatic paid HTTP retries.
+
+Provider settings are in `output/voice/elevenlabs.json`; project choices and audio
+provenance are in `voiceover.json`. Voice cloning and subscription management stay
+in ElevenLabs. The integration can be configured after you subscribe; no account
+or API key is bundled with Video Turbo.
+
+API contracts: [voices](https://elevenlabs.io/docs/api-reference/voices/search),
+[models](https://elevenlabs.io/docs/api-reference/models/list),
+[speech](https://elevenlabs.io/docs/api-reference/text-to-speech/convert).
+
+Verify the integration without an ElevenLabs account:
+
+```powershell
+python -m unittest -v test_voice_generation test_video_studio test_ai_generation test_reference_styles
+```
+
 ## Prepare a video project
 
 Pass the same `--project` folder to both scripts. You can also keep using the `PROJECT_DIR` defaults at the top of the scripts.
@@ -626,3 +682,142 @@ Analytics tests use simulated provider responses and temporary storage:
 ```powershell
 python -m unittest -v test_analytics.py
 ```
+
+## Reference Styles with local Antigravity or Codex
+
+Choose **Create from Reference** in the sidebar, then select **AI provider** and
+its model in the creation dialog. Both Codex / ChatGPT and Antigravity / Gemini
+are available there, with a **Check connection** action. Each model dropdown loads
+live choices from the selected local client: Codex uses `model/list` through its
+app server, and Antigravity uses `agy models`. Only Gemini choices are shown for
+Antigravity, and Codex models that explicitly lack image input are excluded for
+reference analysis. **Refresh models** reloads the list after a sign-in or model
+availability change. Saved choices are retained when switching providers; an
+unavailable saved model is clearly marked and requires a new selection. Loading
+or failed model discovery keeps analysis disabled until a valid choice is ready. Give the project a name and add
+its exact spoken script, a reference video, your recorded voiceover, and optional
+images or clips. The reference can be MP4, MOV, WebM or MKV, up to three minutes.
+Uploaded assets are preferred; your selected AI can research missing public image and
+YouTube sources.
+
+In the project, choose **Analyze & plan scenes** to inspect and edit the result,
+or **Analyze & build video** to run the whole production workflow. Existing
+**Render preview frame**, **Build video**, download and publishing controls work
+with the prepared scenes. Publishing still requires its normal explicit action.
+
+The Antigravity option uses the official CLI (`agy`) on the same computer.
+It does not use the API key or model selected for **AI script & assets**. The
+initial model is `gemini-3.8-flash-medium`; **Local AI connection** lets
+you choose another available Gemini slug, set the CLI executable path, and check
+the connection. Run `agy models` to list your account's available models.
+
+Install the official CLI from [Google's Antigravity documentation](https://antigravity.google/docs/getting-started?tab=cli)
+if necessary, then launch `agy` interactively once to sign in. The app discovers
+`agy` on PATH, the standard Windows `%LOCALAPPDATA%/agy/bin/agy.exe` location,
+or a project-local `output/tools/antigravity/agy.exe`. An explicit configured
+executable takes priority. The desktop launcher is not a replacement for the CLI.
+The integration uses [headless mode](https://antigravity.google/docs/cli/headless),
+your local Antigravity sign-in, stdin prompts and structured JSON output. No
+blanket tool-permission bypass is used. Gemini requests use your Antigravity
+account's availability and quota. The connection is local; Gemini inference is
+hosted, and reference frames, script and asset content read by the agent are
+sent to the model.
+
+Choose **Codex / ChatGPT sign-in** in **Analysis provider** to use Codex instead.
+Video Turbo discovers the local `codex` executable on PATH or in the installed
+Codex IDE extension; an explicit CLI path can also be entered. It uses
+[`codex exec`](https://learn.chatgpt.com/docs/non-interactive-mode) with a read-only
+sandbox, live search, attached reference sheets and image assets, and the same
+structured scene-plan schema. Context is passed through stdin. The default
+Codex model field is blank, which preserves the model configured in your local
+Codex settings; an explicit model ID can be selected. Provider model/path
+preferences are saved separately, so switching does not discard the other setup.
+
+Codex must be [signed in with ChatGPT](https://learn.chatgpt.com/docs/auth), as
+confirmed by `codex login status`. If needed, run `codex login` and finish the
+browser sign-in. This provider does not read, copy or require an API key and does
+not silently switch an existing API-key login to another authentication method.
+It starts a separate local Codex request using the cached sign-in; it does not
+control the open desktop conversation or inherit its chat history. Account access
+and usage limits apply. Reference content read by the model is processed by the
+selected provider's hosted service. The saved style profile records which provider
+and model selection produced it, together with run/thread metadata.
+
+Reference image downloads accept photographs up to 64 megapixels and 12 MB,
+then preserve orientation/transparency and resize them to a maximum edge of
+2560 pixels. Logo downloads retain their separate 16-megapixel limit. If asset
+preparation fails after analysis, retrying the same inputs reuses the saved AI
+plan and downloaded assets. Changing the script, voiceover, reference, uploaded
+assets, style instructions, provider, or model requires a new plan.
+
+New Reference Styles analyses use the directed compositions with moving depth
+layers: grids drift slowly, curves change shape, and orbits and light shapes move
+on one continuous clock. Scene handoffs overlap for up to 0.4 seconds without
+shortening the video or moving narration/caption timestamps. Existing prepared
+plans keep their renderer version until a new analysis is explicitly requested;
+this update does not regenerate existing exports.
+
+Captions keep English spelling and capitalization from the original script,
+including terms inside Arabic sentences. Consecutive English words are grouped
+left-to-right so names such as `Juice Jacking` and `Data Blocker` stay in order.
+The director is also instructed to preserve those terms in on-screen headings.
+
+The production responsibilities are:
+
+- FFmpeg samples the reference at up to three frames per second, with a maximum
+  of 120 timestamped frames. The selected AI views the resulting contact sheets.
+- Whisper aligns your exact script with the recording. The selected AI uses those word
+  timestamps to adapt scene starts to your narration.
+- The selected AI returns a palette, typography category, shadows, floating motion,
+  entrance/transition behavior, caption treatment, timestamped visual observations,
+  asset sources, and a new scene plan. The spoken script stays unchanged.
+- Python validates the data, fetches public images or YouTube sections when
+  selected, and writes editable sections. Failed asset downloads stop preparation
+  with a retryable error rather than silently dropping required media.
+- Remotion renders floating objects, moving cards, two-asset collages and expressive
+  typography using that profile. FFmpeg mixes the recording and optional project
+  music and exports the finished MP4. Reference-style-only projects need no gameplay
+  background.
+
+This is an editable reconstruction using the supported scene compositions and
+font families, not arbitrary generated animation code or a frame-exact clone.
+The reference supplies style guidance; its footage and music are not reused.
+Object cutouts work best with transparent PNG assets. Missing assets are researched
+from public sources; this workflow does not include an image-generation service.
+Check downloaded media for relevance before publishing.
+
+The style profile and provenance are saved in `reference_style.json`; sampled
+frames, model context and the raw plan are under `reference/`. Regular editor
+sections and style settings live in `studio.json` and `config.json`. Script,
+voiceover or reference changes require fresh analysis. Jobs use the existing
+single-job queue and cancellation process, and interrupted analysis can be retried
+without losing uploaded files. The normal AI, JSON-import and manual workflows
+remain available.
+
+Verify the integration:
+
+```powershell
+python -m unittest -v test_reference_styles test_video_studio test_ai_brief test_pipeline test_prepare_assets test_caption_alignment
+node code/tests/reference-motion.cjs
+```
+
+### Reference scene direction and quality
+
+New reference analyses use renderer version 3. The plan describes each scene's
+background tone, fine-grid/orbit/spotlight backdrop, image presentation, emphasis
+and transition, rather than applying one global card layout throughout.
+
+Available compositions include floating objects, framed photos, layered collages,
+typography, an original vector phone story, two-idea comparisons, key figures and
+three-detail sequences. Supporting detail text comes from the scene plan. The
+renderer does not invent statistics or reproduce a reference brand's interface.
+The planner receives actual image dimensions, transparency and white-background
+facts. White product photography can blend into a light stage, while transparent
+cutouts and photographic cards have separate treatments.
+
+The editor exposes the composition, scene background, backdrop, graphic theme,
+image presentation and supporting details. Arabic emphasis highlights one phrase
+inside the heading instead of repeating that phrase below it. New scene entrances
+adapt to scene duration, keep headline text sharp, and preserve the full aligned
+voiceover. Word captions use each scene's background contrast. Existing version 1
+plans retain their original renderer until you analyze again.

@@ -28,6 +28,8 @@ from publishing import Publisher
 from analytics import Analytics
 from ai_generation import AIGenerator
 from ai_series import SeriesLibrary
+import reference_styles
+import voice_generation
 
 ENGINE = Path(__file__).resolve().parent
 WEB = ENGINE / 'studio'
@@ -49,6 +51,7 @@ class Studio:
         self.publisher = Publisher(self.data, self.project)
         self.analytics = Analytics(self.data, self.publisher, self.analytics_projects)
         self.ai = AIGenerator(self.data)
+        self.voice = voice_generation.ElevenLabs(self.data)
         self.series = SeriesLibrary(self.data)
         saved_job = read_cache(self.data / 'ai' / 'job.json')
         if saved_job:
@@ -57,10 +60,18 @@ class Studio:
                 saved_job.update(status='interrupted', stage='AI workflow interrupted', finished=time.time(),
                                  error='Studio restarted. Your script is saved; retry the interrupted step.')
                 if saved_job.get('project') in self.registry:
-                    path = self.project(saved_job['project']) / 'ai_workflow.json'
-                    workflow = read_cache(path)
-                    workflow.update(status='interrupted', error=saved_job['error'])
-                    write_json(path, workflow)
+                    project = self.project(saved_job['project'])
+                    action = saved_job.get('next_action', saved_job.get('action', ''))
+                    if action.startswith('reference_'):
+                        path = project / 'reference_style.json'
+                    elif not saved_job.get('action', '').startswith('voice_'):
+                        path = project / 'ai_workflow.json'
+                    else:
+                        path = None
+                    if path:
+                        workflow = read_cache(path)
+                        workflow.update(status='interrupted', error=saved_job['error'])
+                        write_json(path, workflow)
                 write_json(self.data / 'ai' / 'job.json', saved_job)
 
 
@@ -157,6 +168,114 @@ class Studio:
         write_json(path / 'studio.json', editor)
         return self.register(path)
 
+    def create_reference(self, name, script, instructions='', provider=None):
+        self.idle()
+        if not isinstance(script, str) or not 1 <= len(script.strip()) <= 100000:
+            raise ValueError('Provide the exact spoken script for the reference-style video.')
+        if not isinstance(instructions, str) or len(instructions) > 10000:
+            raise ValueError('Keep style instructions below 10,000 characters.')
+        provider = provider or reference_styles.settings(self.data).get('provider', 'antigravity')
+        if provider not in reference_styles.PROVIDER_NAMES: raise ValueError('Choose Codex / ChatGPT or Antigravity / Gemini.')
+        identifier = self.create(name, 'blank')
+        editor = self.load(identifier)['editor']
+        editor.update(script=script.strip(), sections=[{'layout': 'title', 'title': 'Reference style', 'captions': True}])
+        self.save(identifier, editor)
+        write_json(self.project(identifier) / 'reference_style.json',
+                   {'status': 'awaiting_inputs', 'reference_file': '', 'instructions': instructions, 'analysis_provider': provider, 'error': ''})
+        return self.load(identifier)
+
+    def reference_state(self, identifier):
+        path = self.project(identifier)
+        state = read_cache(path / 'reference_style.json')
+        if not state: return {}
+        state = copy.deepcopy(state)
+        script = (path / 'script.txt').read_text('utf-8-sig').strip() if (path / 'script.txt').is_file() else ''
+        stale = state.get('script_hash') != fingerprint(script)
+        try:
+            stale = stale or state.get('voice_signature') != reference_styles.file_signature(voiceover_path(path))
+            stale = stale or state.get('reference_signature') != reference_styles.file_signature(reference_styles.media_reference(path, state.get('reference_file', '')))
+        except (ValueError, FileNotFoundError): stale = True
+        state['stale'] = stale
+        if state.get('status') == 'analyzing' and not (self.job and self.job.get('project') == identifier and self.job.get('status') in ('running','cancelling')):
+            state.update(status='interrupted', error='Analysis was interrupted. Your files are saved; retry analysis.')
+        return state
+
+    def save_voice(self, identifier, settings):
+        self.idle()
+        path = self.project(identifier)
+        saved = read_cache(path / 'voiceover.json')
+        saved.update(voice_generation.options(settings))
+        write_json(path / 'voiceover.json', saved)
+        return self.load(identifier)
+
+    def start_voice(self, identifier, build=False, force=False, continuation=''):
+        with self.lock:
+            self.idle()
+            path = self.project(identifier)
+            selected = voice_generation.options(voice_generation.project_state(path))
+            if selected['source'] != 'elevenlabs': raise ValueError('Choose ElevenLabs as your voiceover source first.')
+            if not self.voice.snapshot()['configured']: raise ValueError('Connect ElevenLabs in Voice settings first.')
+            if not selected['voice_id'] or not selected['model_id']: raise ValueError('Choose an ElevenLabs voice and model first.')
+            script = (path / 'script.txt').read_text('utf-8-sig').strip() if (path / 'script.txt').exists() else ''
+            if not script: raise ValueError('Add your spoken script before generating a voiceover.')
+            workflow = self.workflow(identifier)
+            if workflow and workflow.get('source') != 'import' and workflow.get('approved_script_hash') != fingerprint(script):
+                raise ValueError('Review and approve the current AI script before generating a voiceover.')
+            reference = self.reference_state(identifier)
+            action = continuation or (('reference_build' if reference else 'build') if build else '')
+            config = read_cache(path / 'config.json')
+            if action.startswith('reference_'):
+                reference_styles.media_reference(path, reference.get('reference_file', ''))
+                connections = reference_styles.settings(self.data)
+                provider = reference.get('analysis_provider') or connections['provider']
+                if provider not in reference_styles.PROVIDER_NAMES: raise ValueError('Choose Codex / ChatGPT or Antigravity / Gemini.')
+                if not connections['providers'][provider]['installed']: raise ValueError('Connect the local analysis provider before generating and building.')
+            elif action:
+                if workflow and workflow.get('source') != 'import' and (workflow.get('status') not in ('assets_ready', 'complete', 'failed', 'interrupted') or self.load(identifier)['editor']['mode'] != 'games'):
+                    raise ValueError('Wait for asset preparation to finish before generating and building.')
+                if 'sections' in config: sections.validate_sections(config, path)
+                elif not config.get('games'): raise ValueError('Save your game list before generating and building.')
+            job = self._ai_job(identifier, 'voice_build' if action else 'voice_generate', 'Preparing ElevenLabs voiceover')
+            job.update(next_action=action, force_voice=force is True)
+            write_json(self.data / 'ai' / 'job.json', job)
+            if workflow and action == 'build':
+                if workflow.get('source') == 'import':
+                    editor = self.load(identifier)['editor']
+                    workflow.update(approved_script=script, approved_script_hash=fingerprint(script), prepared_inputs_hash=self.asset_inputs_hash(editor))
+                workflow.update(status='rendering', error='')
+                write_json(path / 'ai_workflow.json', workflow)
+            threading.Thread(target=self.run, args=(job, path, config, 0), daemon=True).start()
+            return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
+
+    def start_reference(self, identifier, build=True, provider=None):
+        with self.lock:
+            self.idle()
+            path = self.project(identifier)
+            state = self.reference_state(identifier)
+            if not state: raise ValueError('Create a Reference Styles project first.')
+            reference_styles.media_reference(path, state.get('reference_file', ''))
+            selected_voice = voice_generation.project_state(path)
+            if selected_voice['source'] == 'elevenlabs' and (not selected_voice.get('generated_current') or selected_voice.get('stale')):
+                if provider and provider not in reference_styles.PROVIDER_NAMES: raise ValueError('Choose Codex / ChatGPT or Antigravity / Gemini.')
+                state['analysis_provider'] = provider or state.get('analysis_provider')
+                state.pop('stale', None)
+                write_json(path / 'reference_style.json', state)
+                return self.start_voice(identifier, continuation='reference_build' if build else 'reference_plan')
+            voiceover_path(path)
+            connections = reference_styles.settings(self.data)
+            provider = provider or state.get('analysis_provider') or connections.get('provider', 'antigravity')
+            if provider not in reference_styles.PROVIDER_NAMES: raise ValueError('Choose Codex / ChatGPT or Antigravity / Gemini.')
+            selected = connections.get('providers', {}).get(provider, connections)
+            if not selected['installed']:
+                raise ValueError('Connect the selected local AI provider before analyzing.')
+            if not (path / 'script.txt').read_text('utf-8-sig').strip(): raise ValueError('Add your spoken script first.')
+            state.update(analysis_provider=provider)
+            state.pop('stale', None)
+            write_json(path / 'reference_style.json', state)
+            job = self._ai_job(identifier, 'reference_build' if build else 'reference_plan', 'Analyzing reference with ' + reference_styles.PROVIDER_NAMES[provider])
+            threading.Thread(target=self.run, args=(job, path, read_cache(path / 'config.json'), 0), daemon=True).start()
+            return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
+
     def import_brief(self, raw):
         self.idle()
         parsed = parse_brief(raw)
@@ -211,7 +330,8 @@ class Studio:
                 'voiceover': voice, 'music': (path / 'music.mp3').is_file(),
                 'background': (path / 'gta_background.mp4').is_file(),
                 'final': (path / 'output/final.mp4').is_file(), 'preview': (path / 'output/studio_preview.png').is_file(),
-                'ai_workflow': self.workflow(identifier)}
+                'ai_workflow': self.workflow(identifier), 'reference_style': self.reference_state(identifier),
+                'voice_settings': voice_generation.project_state(path)}
 
     def save(self, identifier, editor, *, job_id=None):
         if job_id is None:
@@ -438,8 +558,11 @@ class Studio:
             workflow = self.workflow(identifier)
             if workflow.get('status') != 'assets_ready' or not workflow.get('auto_build'): return
             if self.publisher.running or self.job and self.job.get('status') in ('running','cancelling'): return
-            try: voiceover_path(self.project(identifier))
-            except FileNotFoundError: return
+            selected_voice = voice_generation.project_state(self.project(identifier))
+            if selected_voice['source'] == 'elevenlabs' and (not self.voice.snapshot()['configured'] or not selected_voice.get('voice_id') or not selected_voice.get('model_id')): return
+            if selected_voice['source'] != 'elevenlabs':
+                try: voiceover_path(self.project(identifier))
+                except FileNotFoundError: return
             editor = self.load(identifier)['editor']
             if workflow.get('approved_script_hash') != fingerprint(editor['script'].strip()): return
             if workflow.get('source') == 'import' and workflow.get('prepared_inputs_hash') != self.asset_inputs_hash(editor): return
@@ -451,9 +574,16 @@ class Studio:
             if action not in ('build', 'preview'):
                 raise ValueError('Choose build or preview.')
             path = self.project(identifier)
+            selected_voice = voice_generation.project_state(path)
+            if selected_voice['source'] == 'elevenlabs' and (not selected_voice.get('generated_current') or selected_voice.get('stale')):
+                if action == 'preview': raise ValueError('Generate your voiceover before rendering a preview frame.')
+                return self.start_voice(identifier, build=True)['job']
             voiceover_path(path)
             config = read_cache(path / 'config.json')
             workflow = self.workflow(identifier)
+            reference = self.reference_state(identifier)
+            if reference and (reference.get('status') not in ('ready', 'complete', 'render_failed') or reference.get('stale')):
+                raise ValueError('Analyze the current reference, script and voiceover before building.')
             if workflow and workflow.get('source') != 'import' and (workflow.get('status') not in ('assets_ready','complete','rendering','failed','interrupted') or workflow.get('approved_script_hash') != fingerprint(self.load(identifier)['editor']['script'].strip())):
                 raise ValueError('Approve the current script and prepare its assets before building.')
             if 'sections' in config:
@@ -478,14 +608,21 @@ class Studio:
 
     def run(self, job, path, config, at):
         commands = []
-        if 'sections' not in config and (path / 'games.txt').is_file() and (path / 'games.txt').read_text('utf-8').strip():
+        action = job.get('next_action', job['action'])
+        if job['action'].startswith('voice_'):
+            command = [sys.executable, '-u', str(ENGINE / 'voice_generation.py'), '--project', str(path), '--data', str(self.data)]
+            if job.get('force_voice'): command.append('--force')
+            commands.append(command)
+        if action.startswith('reference_'):
+            commands.append([sys.executable, '-u', str(ENGINE / 'reference_styles.py'), '--project', str(path), '--data', str(self.data)])
+        if action and not action.startswith('reference_') and 'sections' not in config and (path / 'games.txt').is_file() and (path / 'games.txt').read_text('utf-8').strip():
             command = [sys.executable, '-u', str(ENGINE / 'prepare_assets.py'), '--project', str(path)]
-            if job['action'] == 'ai_prepare': command += ['--without-voiceover']
+            if action == 'ai_prepare': command += ['--without-voiceover']
             commands.append(command)
         command = [sys.executable, '-u', str(ENGINE / 'build_video.py'), '--project', str(path), '--no-preview']
-        if job['action'] == 'preview':
+        if action == 'preview':
             command += ['--preview-only', '--preview-at', str(at)]
-        if job['action'] != 'ai_prepare': commands.append(command)
+        if action and action not in ('ai_prepare', 'reference_plan'): commands.append(command)
         try:
             for command in commands:
                 with self.lock:
@@ -505,6 +642,8 @@ class Studio:
                         job['logs'] = job['logs'][-600:]
                         if 'Transcribing' in line: job['stage'] = 'Transcribing voiceover'
                         if 'Aligning' in line: job['stage'] = 'Aligning captions'
+                        if '[VOICE]' in line: job['stage'] = line.split('[VOICE]', 1)[1].strip()
+                        if '[REFERENCE]' in line: job['stage'] = line.split('[REFERENCE]', 1)[1].strip()
                         if '[PREPARE]' in line: job['stage'] = 'Preparing footage'
                         if 'Bundling' in line: job['stage'] = 'Preparing renderer'
                         for word, lower, span in [('Rendered', 10, 75), ('Encoded', 85, 12)]:
@@ -533,12 +672,20 @@ class Studio:
             with self.lock:
                 self.process = None
                 job['finished'] = time.time()
+                reference = read_cache(path / 'reference_style.json')
+                if reference and action:
+                    if job['status'] == 'complete':
+                        reference.update(status='ready' if action in ('reference_plan','preview') else 'complete', error='')
+                    else:
+                        reference.update(status='render_failed' if action in ('build','preview') and reference.get('analysis') else job['status'], error=reference.get('error') or job.get('error',''))
+                    write_json(path / 'reference_style.json', reference)
                 workflow = self.workflow(job['project'])
-                if workflow:
-                    status = ('assets_ready' if job['action'] == 'ai_prepare' else 'complete') if job['status'] == 'complete' else job['status']
-                    workflow.update(status=status, failed_step=job['action'] if job['status'] == 'failed' else '', error=job.get('error', ''))
+                if workflow and action:
+                    status = ('assets_ready' if action == 'ai_prepare' else 'complete') if job['status'] == 'complete' else job['status']
+                    workflow.update(status=status, failed_step=action if job['status'] == 'failed' else '', error=job.get('error', ''))
                     write_json(path / 'ai_workflow.json', workflow)
                     write_json(self.data / 'ai' / 'job.json', job)
+                if self.job is job: write_json(self.data / 'ai' / 'job.json', job)
             if job['action'] == 'ai_prepare' and job['status'] == 'complete': self.maybe_auto_build(job['project'])
 
     def cancel(self):
@@ -606,12 +753,20 @@ class Handler(BaseHTTPRequestHandler):
             if host not in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'):
                 self.json_response({'error': 'Use the localhost address.'}, 403); return
             if parsed.path == '/api/health':
-                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series', 'parallel-publishing', 'analytics']})
+                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series', 'parallel-publishing', 'analytics', 'reference-styles', 'reference-codex', 'reference-models', 'elevenlabs-voice']})
             elif parsed.path == '/api/state':
                 with self.studio.lock:
                     self.json_response({'token': self.studio.token, 'projects': self.studio.list_projects(),
                                         'presets': list(self.studio.presets), 'job': self.studio.job,
                                         'publishing_job': self.studio.publisher.active_job()})
+            elif parsed.path == '/api/voice/settings':
+                with self.studio.lock: self.json_response(self.studio.voice.snapshot())
+            elif parsed.path == '/api/voice/catalog':
+                self.json_response(self.studio.voice.catalog(refresh=query.get('refresh', ['0'])[0] == '1'))
+            elif parsed.path == '/api/reference/models':
+                self.json_response(reference_styles.available_models(self.studio.data, query.get('provider', [''])[0]))
+            elif parsed.path == '/api/reference/settings':
+                self.json_response(reference_styles.settings(self.studio.data))
             elif parsed.path == '/api/ai/settings':
                 with self.studio.lock: self.json_response(self.studio.ai.snapshot())
             elif parsed.path == '/api/ai/series':
@@ -697,6 +852,10 @@ class Handler(BaseHTTPRequestHandler):
                     elif role in ('music', 'background'):
                         if ext != ('.mp3' if role == 'music' else '.mp4'): raise ValueError('Use MP3 for music and MP4 for backgrounds.')
                         target = project / ('music.mp3' if role == 'music' else 'gta_background.mp4')
+                    elif role == 'reference':
+                        if ext not in sections.VIDEO_EXTS: raise ValueError('Choose a video reference.')
+                        if not read_cache(project / 'reference_style.json'): raise ValueError('Create a Reference Styles project first.')
+                        target = project / 'reference' / ('source-' + uuid.uuid4().hex[:12] + ext)
                     elif role == 'media':
                         if ext not in sections.VIDEO_EXTS | sections.IMAGE_EXTS: raise ValueError('Choose a clip or screenshot.')
                         target = project / 'media' / (uuid.uuid4().hex[:12] + '-' + re.sub(r'[^\w .()-]', '', Path(name).stem)[:60] + ext)
@@ -717,7 +876,14 @@ class Handler(BaseHTTPRequestHandler):
                                 old = project / ('voiceover' + suffix)
                                 if old != target: old.unlink(missing_ok=True)
                     finally: pending.unlink(missing_ok=True)
-                    if role == 'voice': self.studio.maybe_auto_build(query['id'][0])
+                    if role == 'reference':
+                        reference = read_cache(project / 'reference_style.json')
+                        reference.update(reference_file=target.relative_to(project).as_posix(), status='awaiting_inputs', error='')
+                        write_json(project / 'reference_style.json', reference)
+                    if role == 'voice':
+                        voice_settings = read_cache(project / 'voiceover.json'); voice_settings['source'] = 'upload'
+                        write_json(project / 'voiceover.json', voice_settings)
+                        self.studio.maybe_auto_build(query['id'][0])
                     self.json_response({'path': target.relative_to(project).as_posix(), 'project': self.studio.load(query['id'][0])})
                 return
             if length > 2 * 1024**2: raise ValueError('Request too large.')
@@ -727,6 +893,20 @@ class Handler(BaseHTTPRequestHandler):
                     result = self.studio.analytics.refresh()
                 elif parsed.path == '/api/create':
                     identifier = self.studio.create(data['name'], data.get('preset', 'blank')); result = self.studio.load(identifier)
+                elif parsed.path == '/api/voice/settings':
+                    self.studio.idle(); result = self.studio.voice.configure(data.get('api_key', ''), data.get('defaults'))
+                elif parsed.path == '/api/voice/project':
+                    result = self.studio.save_voice(data['id'], data['settings'])
+                elif parsed.path == '/api/voice/start':
+                    result = self.studio.start_voice(data['id'], data.get('build', False) is True, data.get('force', False) is True)
+                elif parsed.path == '/api/reference/create':
+                    result = self.studio.create_reference(data['name'], data['script'], data.get('instructions', ''), data.get('provider'))
+                elif parsed.path == '/api/reference/start':
+                    result = self.studio.start_reference(data['id'], data.get('build', True) is True, data.get('provider'))
+                elif parsed.path == '/api/reference/settings':
+                    self.studio.idle(); result = reference_styles.configure(self.studio.data, data.get('cli_path',''), data.get('model'), data.get('provider','antigravity'))
+                elif parsed.path == '/api/reference/check':
+                    self.studio.idle(); result = reference_styles.check_connection(self.studio.data)
                 elif parsed.path == '/api/ai/settings':
                     self.studio.idle(); result = self.studio.ai.configure(data['provider'], data.get('model',''), data.get('api_key',''))
                 elif parsed.path == '/api/ai/series':
@@ -794,6 +974,11 @@ class Handler(BaseHTTPRequestHandler):
                     write_json(self.studio.data / 'studio_presets.json', self.studio.presets)
                     result = {'ok': True}
                 else: raise ValueError('Unknown action.')
+                if parsed.path in ('/api/create', '/api/reference/create', '/api/brief/import', '/api/ai/create') and data.get('voice_source') in ('upload', 'elevenlabs'):
+                    project = result.get('project', result)
+                    selected = {**voice_generation.DEFAULTS, **self.studio.voice.snapshot()['defaults'], 'source': data['voice_source']}
+                    write_json(self.studio.project(project['id']) / 'voiceover.json', selected)
+                    project['voice_settings'] = voice_generation.project_state(self.studio.project(project['id']))
             self.json_response(result)
         except (ValueError, KeyError, OSError, TypeError) as error:
             self.json_response({'error': str(error)}, 400)
@@ -809,7 +994,7 @@ class StudioServer(ThreadingHTTPServer):
         super().server_bind()
 
 
-def running_studio(url, require_series=False, require_parallel=False, require_analytics=False):
+def running_studio(url, require_series=False, require_parallel=False, require_analytics=False, require_reference=False, require_codex=False, require_models=False, require_voice=False):
     """Identify this studio without changing its projects or interrupting a job."""
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -819,7 +1004,11 @@ def running_studio(url, require_series=False, require_parallel=False, require_an
                 and isinstance(data.get('engine'), str) and Path(data['engine']).resolve() == ENGINE
                 and (not require_series or 'ai-series' in data.get('features', []))
                 and (not require_parallel or 'parallel-publishing' in data.get('features', []))
-                and (not require_analytics or 'analytics' in data.get('features', [])))
+                and (not require_analytics or 'analytics' in data.get('features', []))
+                and (not require_reference or 'reference-styles' in data.get('features', []))
+                and (not require_codex or 'reference-codex' in data.get('features', []))
+                and (not require_models or 'reference-models' in data.get('features', []))
+                and (not require_voice or 'elevenlabs-voice' in data.get('features', [])))
     except (OSError, ValueError, TypeError):
         return False
 
@@ -849,7 +1038,7 @@ def main():
             server = StudioServer(('127.0.0.1', port), Handler)
             break
         except OSError as error:
-            if running_studio(url, require_series=True, require_parallel=True, require_analytics=True):
+            if running_studio(url, require_series=True, require_parallel=True, require_analytics=True, require_reference=True, require_codex=True, require_models=True, require_voice=True):
                 print(f'Video Turbo Studio is already running: {url}', flush=True)
                 if not args.no_browser: webbrowser.open(url)
                 return 0

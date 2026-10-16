@@ -106,7 +106,8 @@ def check_required_files():
 
     # 1. Background video (check project folder, fallback to engine folder)
     gta_bg = PROJECT_PATH / "gta_background.mp4"
-    if not gta_bg.exists():
+    needs_background = any(row.get("layout") != "reference_style" for row in load_config().get("sections", [{}]))
+    if needs_background and not gta_bg.exists():
         if (ENGINE_DIR / "gta_background.mp4").exists():
             gta_bg = ENGINE_DIR / "gta_background.mp4"
         else:
@@ -940,6 +941,8 @@ def sync_public_assets() -> dict:
         sources[relative] = signature
         outputs[relative] = file_signature(target)
 
+    config = load_config()
+    needs_background = any(row.get("layout") != "reference_style" for row in config.get("sections", [{}]))
     for name, aliases in {
         "gta_background.mp4": ["gta_background.mp4"],
         "roblox.mp4": ["roblox.mp4", "Roblox 1.mp4"],
@@ -949,7 +952,7 @@ def sync_public_assets() -> dict:
                        for alias in aliases if (base / alias).is_file()), None)
         if source:
             publish(source, name)
-        elif name == "gta_background.mp4":
+        elif name == "gta_background.mp4" and needs_background:
             raise FileNotFoundError("gta_background.mp4 is missing.")
 
     config = load_config()
@@ -958,6 +961,9 @@ def sync_public_assets() -> dict:
             for field in ("media", "secondary_media"):
                 if section.get(field):
                     publish(video_sections.media_path(PROJECT_PATH, section[field]), video_sections.public_media(section[field]))
+    if config.get("reference_style"):
+        for name in ("ibm-plex-sans-arabic-700.woff2", "Amiri-Bold.ttf"):
+            publish(ENGINE_DIR / "studio/ui-fonts" / name, "reference-fonts/" + name)
     for game in ([] if "sections" in config else get_game_definitions(config)):
         top, bottom = resolve_game_clips(game["path"])
         for clip in {top, bottom}:

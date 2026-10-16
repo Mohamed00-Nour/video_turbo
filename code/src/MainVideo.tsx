@@ -1,5 +1,5 @@
 import React from "react";
-import { Series, useCurrentFrame } from "remotion";
+import { Series, useCurrentFrame, useVideoConfig } from "remotion";
 import "./font.css";
 import timelineData from "./timeline.json";
 import { HookBlock } from "./HookBlock";
@@ -7,10 +7,13 @@ import { GameBlock } from "./GameBlock";
 import { CtaBlock } from "./CtaBlock";
 import { SectionBlock } from "./SectionBlock";
 import { Caption } from "./Caption";
+import {ReferenceScenes} from "./reference/ReferenceScenes";
 
-export const MainVideo: React.FC = () => {
+export const MainVideo: React.FC<{timeline?:typeof timelineData}> = ({timeline=timelineData}) => {
   const currentFrame = useCurrentFrame();
-  const { blocks } = timelineData;
+  const {fps} = useVideoConfig();
+  const { blocks } = timeline;
+  const movingReference=blocks.length>0 && blocks.every((block:any)=>block.layout==='reference_style' && block.referenceStyle?.renderer_version>=3);
 
   return (
     <div
@@ -22,11 +25,11 @@ export const MainVideo: React.FC = () => {
         overflow: "hidden",
       }}
     >
-      <Series>
+      {movingReference ? <ReferenceScenes blocks={blocks}/> : <Series>
         {blocks.map((block: any, index: number) => {
           if (block.type === "section") {
-            return <Series.Sequence key={index} durationInFrames={block.durationFrames}>
-              <SectionBlock block={block} blur={(timelineData as any).style?.bgBlurScale ?? 0.6} />
+            return <Series.Sequence key={index} durationInFrames={block.durationFrames} premountFor={fps}>
+              <SectionBlock block={block} blur={(timeline as any).style?.bgBlurScale ?? 0.6} />
             </Series.Sequence>;
           }
           if (block.type === "hook") {
@@ -63,7 +66,7 @@ export const MainVideo: React.FC = () => {
                   hasLogo={block.hasLogo}
                   reveal={block.reveal}
                   logoEffect={block.logoEffect}
-                  bgBlurScale={(timelineData as any).style?.bgBlurScale}
+                  bgBlurScale={(timeline as any).style?.bgBlurScale}
                 />
               </Series.Sequence>
             );
@@ -84,10 +87,10 @@ export const MainVideo: React.FC = () => {
           }
           return null;
         })}
-      </Series>
+      </Series>}
 
       {/* Global Caption Overlay */}
-      <Caption currentFrame={currentFrame} />
+      <Caption currentFrame={currentFrame} timeline={timeline} />
     </div>
   );
 };

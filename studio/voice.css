@@ -1,0 +1,9 @@
+.voice-source-row,.voice-connection-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.voice-source-row>.field{flex:1;min-width:200px}.voice-source-row>.quiet{margin-top:8px}
+.voice-elevenlabs{border:1px solid var(--line);border-radius:18px;padding:18px;margin:6px 0 18px;background:var(--surface)}
+.voice-connection-row>.hint{flex:1;min-width:160px}.voice-select-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.voice-select-grid select{width:100%;min-width:0;text-overflow:ellipsis}.voice-delivery-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.voice-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:14px}.voice-actions>button{min-height:44px}
+#voice-settings-dialog{width:min(680px,calc(100vw - 32px));max-width:680px}#voice-settings-dialog form{min-width:0}#voice-settings-dialog .voice-select-grid{margin-top:16px}
+#voice-audio-status{overflow-wrap:anywhere}#voice-player{width:100%;margin-top:12px}
+@media(max-width:600px){.voice-select-grid,.voice-delivery-grid{grid-template-columns:1fr}.voice-elevenlabs{padding:14px}.voice-actions>button{width:100%}.voice-connection-row>button{width:100%}}
