@@ -167,6 +167,7 @@ class TransportTests(unittest.TestCase):
 
 class PublisherTests(unittest.TestCase):
     def setUp(self):
+        delay = patch.object(pub, 'META_RETRY_DELAY', 0); delay.start(); self.addCleanup(delay.stop)
         temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name); self.project = self.root / 'project'
         (self.project / 'output').mkdir(parents=True); (self.project / 'output/final.mp4').write_bytes(b'video bytes')
@@ -196,7 +197,8 @@ class PublisherTests(unittest.TestCase):
     def ambiguous(self):
         self.connect()
         self.app.session = StreamingSession(Response(payload=CREATE), Response(payload={'success':True}),
-            status('FINISHED'), requests.ConnectionError(TOKEN))
+            status('FINISHED'), requests.ConnectionError(TOKEN),
+            *[requests.ConnectionError('status unavailable') for _ in range(pub.META_RECOVERY_CHECKS)])
         self.start()
         return self.app.job['id']
 

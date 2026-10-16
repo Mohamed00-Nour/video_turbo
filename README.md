@@ -72,6 +72,10 @@ For IGDB logo downloads, provide `IGDB_CLIENT_ID` and `IGDB_CLIENT_SECRET` as en
 python build_video.py --project "G:\A Steady\Anti-vids\game 5" --no-preview
 ```
 
+If Chrome times out while starting, the build or preview retries once with
+verbose browser diagnostics. Other render failures stop immediately. If both
+startup attempts time out, the job reports the browser error in its log.
+
 The final video is saved to `<PROJECT_DIR>/output/final.mp4`, with preview frames and caption data in the output folder. The caption timeline is generated at `code/src/timeline.json` before rendering. Media, generated timelines, downloaded fonts, and installed dependencies are excluded from Git.
 
 Use `--force` to render again, `--retranscribe` to request fresh transcription,
@@ -373,6 +377,14 @@ The review controls appear inside that card with its posting details selected.
 Watch the preview, check the review box, then click **Upload to YouTube**,
 **Publish Instagram Reel** or **Publish Facebook Page Reel** in the card.
 Each click starts one upload, and its progress appears in that platform card.
+To start several destinations together, use **Publish to multiple platforms**:
+select connected YouTube, Instagram and/or Facebook Page accounts, review the
+posting details and settings shown for each, check the review box, then click
+**Publish selected platforms**. The selection is validated before any upload
+starts. Each platform uploads independently; one failure does not stop the
+others. You can also start another platform while an upload is running.
+Account changes and video editing stay locked until all uploads finish.
+TikTok and Facebook profiles continue to use the assisted upload controls.
 Switching destinations or changing posting options or the finished file clears
 the review. A completed upload of the same file to the same platform
 is blocked to prevent duplicate posts. Facebook Page uploads track the connected
@@ -391,6 +403,20 @@ panel. This makes read-only API checks and updates the local history only after
 YouTube confirms processing is complete and the channel, title and file size
 match. While YouTube is still processing, it asks you to wait rather than marking
 the attempt successful. It never uploads another copy.
+
+Facebook Page and local Instagram uploads automatically retry interrupted
+transfers up to three attempts, waiting one and then two seconds before retrying.
+A retry starts a new upload session before publication; progress shows the retry
+number. If the finished file changes, the retry stops for a new review. Expired
+tokens, permission errors and TLS certificate failures do not trigger retries.
+
+If the connection drops after the publish request, Studio checks the existing
+video/container up to three times using reads only. Confirmed publication marks
+the job complete. An unconfirmed publish remains blocked from creating a new
+copy. **Check existing upload** also retries interrupted status reads. When a
+failed transfer is safe to restart, posting history offers **Retry upload**;
+this opens the review controls before another upload starts. Retry counts and
+publication checkpoints remain saved after a Studio restart.
 
 Assisted uploads have **Copy caption**, **Open uploader** and **Mark published**
 controls. Marking a post only records its optional post link in local history;
@@ -476,15 +502,22 @@ Facebook personal profile remains available through assisted upload.
    Your account needs permission to create content on that Page. During app
    development, use an account with the appropriate app role; publishing for
    other users may require App Review.
-3. Open **User or Page** and select your Page under **Page Access Tokens**.
-   Alternatively, run
-   `GET me/accounts?fields=id,name,access_token,tasks` with the authorized user
-   token and copy the **access_token for the intended Page** from the response.
-4. In Studio, open a completed project > **Publish video** > **Facebook Page**
+3. Extend the **User Access Token before requesting the Page token**. Open
+   [Meta Access Token Debugger](https://developers.facebook.com/tools/debug/accesstoken/),
+   inspect the User token, and select **Extend Access Token** if available.
+   Otherwise follow [Meta's long-lived token exchange guide](https://developers.facebook.com/docs/facebook-login/guides/access-tokens/get-long-lived/).
+   Copy the resulting long-lived User token back into Graph API Explorer.
+4. With that **long-lived User token**, run
+   `GET me/accounts?fields=id,name,access_token,tasks` and copy the
+   **access_token for the intended Page** from the response. Check this Page
+   token in the debugger before saving it. A Page token obtained from a
+   temporary User token can expire within hours. Studio validates and stores
+   pasted tokens; it does not extend temporary Meta tokens.
+5. In Studio, open a completed project > **Publish video** > **Facebook Page**
    > **Connect Page / account setup**. Paste the Page token and click **Connect
    Page**. Studio detects its numeric Page ID and displays the Page name. The
    optional Page ID field checks that the token belongs to that exact Page.
-5. Select **Facebook Page Reel**, confirm the displayed Page and posting
+6. Select **Facebook Page Reel**, confirm the displayed Page and posting
    details, review the final video, then click **Publish Facebook Page Reel**.
    Studio streams the local MP4 directly to Meta and waits for the publishing
    phase to complete before recording success. No Cloudflare link is needed.
@@ -495,10 +528,14 @@ Page until the existing attempt is checked. Click **Check existing upload** on
 its history entry: this only reads the video's status and checks Page ownership.
 A confirmed published Reel updates history; ongoing processing asks you to wait.
 A confirmed failed upload permits a new reviewed attempt. Upload and publication
-requests are never automatically repeated. A confirmed success remains successful
-if the later permalink lookup fails; a link using the confirmed video ID is shown.
+requests are not repeated after a publish may have reached Meta. A confirmed
+success remains successful if the later permalink lookup fails; a link using the confirmed video ID is shown.
 
-Page tokens can expire or be revoked; reconnect in account setup when required.
+Page tokens derived from long-lived User tokens have no fixed expiration date,
+but Meta can still invalidate their access. Reconnect in account setup when
+required. Instagram linked to the same Page automatically reuses the replacement
+Page token; it does not need a separate reconnect unless the linked account or
+Page changes.
 See [Meta's Page Reel publishing sample](https://github.com/fbsamples/reels_publishing_apis/tree/main/fb_reels_publishing_api_sample)
 for the upload protocol and required Page permissions.
 
@@ -556,3 +593,36 @@ Pages, matches the entered Page ID, and validates the returned Page token before
 saving. Multiple Pages require an explicit Page ID; Studio never selects another
 Page when the intended one is unavailable. Connection errors include Meta's
 field or permission explanation with tokens and provider URLs redacted.
+
+
+## Views dashboard
+
+Open **Analytics** in the Studio top bar to see saved views for videos published
+through Video Turbo to YouTube, Instagram and Facebook Pages. Select a video
+and choose **7 days** or **30 days** to inspect its growth. The chart appears
+after four saved samples; the recorded-count table is available from the first
+sample. Combined views sum reported platform counts, including repeat viewers
+across platforms; each card shows how many posts have available data.
+
+**Refresh views** reads statistics without uploading or modifying a post.
+Studio also refreshes every 15 minutes while its process runs. Refreshes run in
+the background and remain available during video builds and platform uploads.
+Manual refreshes have a one-minute cooldown. Saved counts and history live in
+`output/analytics.sqlite3`, excluded from Git. History starts at the first
+successful refresh; Studio cannot reconstruct earlier daily view counts.
+
+YouTube reuses the connected channel's access and refresh tokens. Linked
+Instagram accounts need `instagram_manage_insights` and
+`pages_read_engagement` on the Facebook connection; Instagram Login needs
+`instagram_business_manage_insights`. Facebook Page statistics require Page
+read access (`pages_read_engagement`); Insights access additionally uses
+`read_insights`. If access expires or permissions are missing, the dashboard
+shows an account setup link and retains the last successful count. Reconnect
+with the required access in **Publishing > Account setup**, then refresh views.
+TikTok and personal Facebook profile uploads are outside this first version.
+
+Analytics tests use simulated provider responses and temporary storage:
+
+```powershell
+python -m unittest -v test_analytics.py
+```

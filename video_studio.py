@@ -25,6 +25,7 @@ from pipeline_common import read_cache, write_json, voiceover_path, fingerprint
 import video_sections as sections
 from ai_brief import parse_brief, image_url
 from publishing import Publisher
+from analytics import Analytics
 from ai_generation import AIGenerator
 from ai_series import SeriesLibrary
 
@@ -46,6 +47,7 @@ class Studio:
         self.process = None
         self.token = secrets.token_urlsafe(32)
         self.publisher = Publisher(self.data, self.project)
+        self.analytics = Analytics(self.data, self.publisher, self.analytics_projects)
         self.ai = AIGenerator(self.data)
         self.series = SeriesLibrary(self.data)
         saved_job = read_cache(self.data / 'ai' / 'job.json')
@@ -62,6 +64,10 @@ class Studio:
                 write_json(self.data / 'ai' / 'job.json', saved_job)
 
 
+    def analytics_projects(self):
+        with self.lock:
+            return [{'id': key, 'name': value['name']} for key, value in self.registry.items()]
+
     def persist(self):
         write_json(self.data / 'studio_registry.json', self.registry)
 
@@ -70,8 +76,8 @@ class Studio:
             raise ValueError('Project not found.')
         return Path(self.registry[identifier]['path']).resolve()
 
-    def idle(self):
-        if self.publisher.running:
+    def idle(self, allow_publishing=False):
+        if not allow_publishing and self.publisher.running:
             raise ValueError('Wait for the publishing upload to finish before changing the video project.')
         if self.job and self.job['status'] in ('running', 'cancelling'):
             raise ValueError('Wait for the current job or cancel it before making changes.')
@@ -600,7 +606,7 @@ class Handler(BaseHTTPRequestHandler):
             if host not in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'):
                 self.json_response({'error': 'Use the localhost address.'}, 403); return
             if parsed.path == '/api/health':
-                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series']})
+                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series', 'parallel-publishing', 'analytics']})
             elif parsed.path == '/api/state':
                 with self.studio.lock:
                     self.json_response({'token': self.studio.token, 'projects': self.studio.list_projects(),
@@ -621,6 +627,10 @@ class Handler(BaseHTTPRequestHandler):
                 with self.studio.lock: self.json_response(self.studio.load(query['id'][0]))
             elif parsed.path == '/api/job':
                 with self.studio.lock: self.json_response(self.studio.job)
+            elif parsed.path == '/api/analytics':
+                self.json_response(self.studio.analytics.snapshot())
+            elif parsed.path == '/api/analytics/history':
+                self.json_response(self.studio.analytics.history(query['video'][0], int(query.get('days', ['7'])[0])))
             elif parsed.path == '/api/publishing':
                 self.json_response(self.studio.publisher.snapshot(query['id'][0]))
             elif parsed.path == '/api/publishing/job':
@@ -713,7 +723,9 @@ class Handler(BaseHTTPRequestHandler):
             if length > 2 * 1024**2: raise ValueError('Request too large.')
             data = json.loads(self.rfile.read(length))
             with self.studio.lock:
-                if parsed.path == '/api/create':
+                if parsed.path == '/api/analytics/refresh':
+                    result = self.studio.analytics.refresh()
+                elif parsed.path == '/api/create':
                     identifier = self.studio.create(data['name'], data.get('preset', 'blank')); result = self.studio.load(identifier)
                 elif parsed.path == '/api/ai/settings':
                     self.studio.idle(); result = self.studio.ai.configure(data['provider'], data.get('model',''), data.get('api_key',''))
@@ -754,8 +766,12 @@ class Handler(BaseHTTPRequestHandler):
                     self.studio.idle(); result = self.studio.publisher.check_account(data['platform'])
                 elif parsed.path == '/api/publishing/disconnect':
                     self.studio.idle(); result = self.studio.publisher.disconnect(data['platform'])
+                elif parsed.path == '/api/publishing/start-many':
+                    self.studio.idle(allow_publishing=True)
+                    result = self.studio.publisher.start_many(data['id'], data['platforms'], data['draft'],
+                              data.get('reviewed', False), data.get('video_signature', ''))
                 elif parsed.path == '/api/publishing/start':
-                    self.studio.idle()
+                    self.studio.idle(allow_publishing=True)
                     result = self.studio.publisher.start(data['id'], data['platform'], data['draft'],
                               data.get('reviewed', False), data.get('video_signature', ''))
                 elif parsed.path == '/api/publishing/verify-youtube':
@@ -793,7 +809,7 @@ class StudioServer(ThreadingHTTPServer):
         super().server_bind()
 
 
-def running_studio(url, require_series=False):
+def running_studio(url, require_series=False, require_parallel=False, require_analytics=False):
     """Identify this studio without changing its projects or interrupting a job."""
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -801,7 +817,9 @@ def running_studio(url, require_series=False):
             data = json.loads(response.read(8192))
         return (isinstance(data, dict) and data.get('app') == 'video-turbo-studio'
                 and isinstance(data.get('engine'), str) and Path(data['engine']).resolve() == ENGINE
-                and (not require_series or 'ai-series' in data.get('features', [])))
+                and (not require_series or 'ai-series' in data.get('features', []))
+                and (not require_parallel or 'parallel-publishing' in data.get('features', []))
+                and (not require_analytics or 'analytics' in data.get('features', [])))
     except (OSError, ValueError, TypeError):
         return False
 
@@ -831,7 +849,7 @@ def main():
             server = StudioServer(('127.0.0.1', port), Handler)
             break
         except OSError as error:
-            if running_studio(url, require_series=True):
+            if running_studio(url, require_series=True, require_parallel=True, require_analytics=True):
                 print(f'Video Turbo Studio is already running: {url}', flush=True)
                 if not args.no_browser: webbrowser.open(url)
                 return 0
@@ -845,12 +863,14 @@ def main():
             print(f'Cannot start the studio on port {port}: {error}. Use the already running studio, or choose another --port.', file=sys.stderr)
             return 1
     server.studio = Studio()
+    server.studio.analytics.start_auto()
     url = f'http://127.0.0.1:{server.server_port}'
     print(f'Video Turbo Studio: {url}', flush=True)
     if not args.no_browser: webbrowser.open(url)
     try: server.serve_forever()
     except KeyboardInterrupt: pass
     finally:
+        server.studio.analytics.close()
         if server.studio.job and server.studio.job['status'] == 'running': server.studio.cancel()
         server.server_close()
 

@@ -2,10 +2,40 @@ import React from 'react';
 import { Img, interpolate, staticFile, useCurrentFrame } from 'remotion';
 import { LoopingVideo } from './LoopingVideo';
 import { FlashTransition } from './FlashTransition';
+import { CyberBreachScene } from './CyberBreachScene';
+import { ThermalMeltdownScene } from './ThermalMeltdownScene';
+import { ZeroRansomScene } from './ZeroRansomScene';
 
 type Media = { src: string; kind: string; durationFrames?: number };
 export const SectionBlock: React.FC<{ block: any; blur: number }> = ({ block, blur }) => {
   const frame = useCurrentFrame();
+
+  if (block.layout === 'cyber_breach') {
+    return (
+      <div style={{ position: 'relative', width: 1080, height: 1920, overflow: 'hidden' }}>
+        <CyberBreachScene durationFrames={block.durationFrames} block={block} />
+        <FlashTransition frameInBlock={frame} />
+      </div>
+    );
+  }
+
+  if (block.layout === 'thermal_meltdown') {
+    return (
+      <div style={{ position: 'relative', width: 1080, height: 1920, overflow: 'hidden' }}>
+        <ThermalMeltdownScene durationFrames={block.durationFrames} block={block} />
+        <FlashTransition frameInBlock={frame} />
+      </div>
+    );
+  }
+
+  if (block.layout === 'zero_ransom') {
+    return (
+      <div style={{ position: 'relative', width: 1080, height: 1920, overflow: 'hidden' }}>
+        <ZeroRansomScene durationFrames={block.durationFrames} block={block} />
+        <FlashTransition frameInBlock={frame} />
+      </div>
+    );
+  }
   const progress = frame / Math.max(1, block.durationFrames);
   const entrance = interpolate(frame, [4, 18], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
   const card = (media: Media | null, top: number, height: number, primary = true) => media && (

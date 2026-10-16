@@ -307,7 +307,145 @@ class PublishingTests(unittest.TestCase):
         self.assertNotIn('provider.example', result['job']['error'])
         self.assertFalse(result['job']['url'])
 
-    def test_single_job_blocks_account_mutations_and_parallel_uploads(self):
+    def connect_multiple(self):
+        self.app.vault['accounts']['facebook_page'] = {'access_token': 'PAGE_TOKEN', 'page_id': '123', 'name': 'My Page'}
+        self.app.vault['accounts']['instagram'] = {'access_token': 'IG_TOKEN', 'user_id': '456', 'name': '@creator',
+            'connection_type': 'facebook', 'page_id': '123'}
+        self.draft['facebook_page_id'] = '123'
+
+    def finish_all(self):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            with self.app.lock:
+                snapshot = self.app.snapshot('project')
+                if not self.app.running and all(entry['status'] != 'running' for entry in snapshot['history']):
+                    return snapshot
+            time.sleep(.01)
+        self.fail('Publishing workers did not finish')
+
+    def test_three_platform_workers_start_together_and_keep_separate_progress(self):
+        self.connect_multiple()
+        started = {platform: threading.Event() for platform in pub.DIRECT}
+        release = threading.Event()
+        self.addCleanup(release.set)
+        def adapter(platform, percent):
+            def upload(session, account, path, draft, progress, **kwargs):
+                progress(percent, 'Uploading ' + platform)
+                started[platform].set()
+                if not release.wait(3): raise ValueError('Test worker timed out')
+                return {'remote_id': platform + '-video'}
+            return upload
+        with patch.object(pub, 'youtube_upload', side_effect=adapter('youtube', 10)), \
+                patch.object(pub, 'instagram_local_publish', side_effect=adapter('instagram', 40)), \
+                patch.object(pub, 'facebook_publish', side_effect=adapter('facebook_page', 70)):
+            result = self.app.start_many('project', list(pub.DIRECT), self.draft, True, self.signature)
+            try:
+                self.assertEqual(len(result['jobs']), 3)
+                self.assertTrue(all(event.wait(2) for event in started.values()))
+                snapshot = self.app.snapshot('project')
+                self.assertEqual({job['platform']: job['progress'] for job in snapshot['jobs']},
+                                 {'youtube': 10, 'instagram': 40, 'facebook_page': 70})
+                self.assertEqual(len(snapshot['history']), 3)
+                self.assertTrue(self.app.running)
+                self.assertEqual(self.app.active_job()['status'], 'running')
+                with self.assertRaisesRegex(ValueError, 'already running'):
+                    self.app.start('project', 'youtube', self.draft, True, self.signature)
+                with self.assertRaises(ValueError): self.app.disconnect('instagram')
+            finally: release.set()
+            snapshot = self.finish_all()
+        self.assertTrue(all(job['status'] == 'complete' for job in snapshot['jobs']))
+        self.assertTrue(all(entry['status'] == 'complete' for entry in snapshot['history']))
+        self.assertFalse(self.app.running)
+        restarted = pub.Publisher(self.root / 'data', lambda key: self.project, session=Session())
+        self.assertEqual(len(restarted.snapshot('project')['jobs']), 3)
+
+    def test_can_start_another_platform_while_last_job_completes_and_failure_is_isolated(self):
+        self.connect_multiple()
+        started = threading.Event(); release = threading.Event(); self.addCleanup(release.set)
+        def upload(session, account, path, draft, progress):
+            started.set()
+            if not release.wait(3): raise ValueError('Test worker timed out')
+            return {'remote_id': 'youtube-video'}
+        with patch.object(pub, 'youtube_upload', side_effect=upload), \
+                patch.object(pub, 'facebook_publish', side_effect=ValueError('Page upload failed')):
+            self.app.start('project', 'youtube', self.draft, True, self.signature)
+            self.assertTrue(started.wait(2))
+            self.app.start('project', 'facebook_page', self.draft, True, self.signature)
+            self.wait()
+            try:
+                self.assertEqual(self.app.job['status'], 'failed')
+                self.assertTrue(self.app.running)
+                self.assertEqual(self.app.active_job()['platform'], 'youtube')
+                with self.assertRaises(ValueError): self.app.save_draft('project', self.draft)
+            finally: release.set()
+            snapshot = self.finish_all()
+        self.assertEqual({job['platform']: job['status'] for job in snapshot['jobs']},
+                         {'youtube': 'complete', 'facebook_page': 'failed'})
+
+    def test_batch_validation_is_atomic_and_requires_review(self):
+        for platforms, reviewed in [([], True), (['youtube','youtube'], True), (['youtube','tiktok'], True),
+                                     (['youtube','instagram'], True), (['youtube'], False), ('youtube', True)]:
+            with self.subTest(platforms=platforms, reviewed=reviewed), patch.object(pub.threading, 'Thread') as worker:
+                with self.assertRaises(ValueError):
+                    self.app.start_many('project', platforms, self.draft, reviewed, self.signature)
+                worker.assert_not_called()
+                self.assertFalse(self.app.snapshot('project')['history'])
+                self.assertIsNone(self.app.job)
+        self.connect_multiple()
+        invalid = {**self.draft, 'platform_overrides': {'instagram': {'description': 'a' * 2201}}}
+        with patch.object(pub.threading, 'Thread') as worker:
+            with self.assertRaisesRegex(ValueError, '2,200'):
+                self.app.start_many('project', ['youtube', 'instagram'], invalid, True, self.signature)
+            worker.assert_not_called()
+        self.assertFalse(self.app.snapshot('project')['history'])
+
+    def test_duplicate_is_blocked_until_completed_history_is_durable(self):
+        with patch.object(pub.threading, 'Thread'):
+            self.app.start('project', 'youtube', self.draft, True, self.signature)
+        self.app.job['status'] = 'complete'
+        with self.assertRaisesRegex(ValueError, 'already running'):
+            self.app.start('project', 'youtube', self.draft, True, self.signature)
+        self.assertEqual(len(self.app.snapshot('project')['history']), 1)
+
+    def test_restart_interrupts_all_running_jobs_and_preserves_each_checkpoint(self):
+        self.connect_multiple()
+        self.app._vault_save()
+        with patch.object(pub.threading, 'Thread'):
+            self.app.start_many('project', list(pub.DIRECT), self.draft, True, self.signature)
+        jobs = {job['platform']: job for job in self.app._jobs()}
+        self.app._checkpoint(jobs['facebook_page'], remote_id='789', publish_attempted=True)
+        self.app._instagram_checkpoint(jobs['instagram'], container_id='987', publish_attempted=True)
+        jobs['youtube'].update(status='complete', progress=100)
+        self.app._history_status(jobs['youtube']); self.app._persist_job()
+        restarted = pub.Publisher(self.root / 'data', lambda key: self.project, session=Session())
+        snapshot = restarted.snapshot('project')
+        self.assertEqual({job['platform']: job['status'] for job in snapshot['jobs']},
+                         {'youtube': 'complete', 'instagram': 'interrupted', 'facebook_page': 'interrupted'})
+        self.assertTrue(all(row['status'] != 'running' for row in snapshot['history']))
+        self.assertEqual(restarted._find_job(jobs['instagram']['id'])['container_id'], '987')
+        self.assertEqual(restarted._find_job(jobs['facebook_page']['id'])['remote_id'], '789')
+        self.assertFalse(restarted.running)
+        with self.assertRaisesRegex(ValueError, 'may already have succeeded'):
+            restarted.start('project', 'instagram', self.draft, True, self.signature)
+        self.assertFalse(restarted.session.calls)
+
+    def test_production_workers_use_separate_http_sessions(self):
+        self.connect_multiple()
+        self.app.session = requests.Session(); self.app.worker_sessions = True
+        self.addCleanup(self.app.session.close)
+        sessions = []
+        def upload(session, account, path, draft, progress, **kwargs):
+            sessions.append(session)
+            return {'remote_id': 'video'}
+        with patch.object(pub, 'youtube_upload', side_effect=upload), \
+                patch.object(pub, 'instagram_local_publish', side_effect=upload), \
+                patch.object(pub, 'facebook_publish', side_effect=upload):
+            self.app.start_many('project', list(pub.DIRECT), self.draft, True, self.signature)
+            self.finish_all()
+        self.assertEqual(len({id(session) for session in sessions}), 3)
+        self.assertTrue(all(session is not self.app.session for session in sessions))
+
+    def test_unknown_running_job_blocks_account_mutations_and_new_uploads(self):
         self.app.job = {'status': 'running'}
         for operation in (lambda: self.app.start('project', 'youtube', self.draft, True, self.signature),
                           lambda: self.app.disconnect('youtube'), lambda: self.app.save_draft('project', self.draft)):
@@ -471,6 +609,34 @@ class HttpTests(unittest.TestCase):
         for route, data in [('/api/create',{'name':'another'}),('/api/start',{'id':self.identifier,'action':'build'})]:
             with self.assertRaises(urllib.error.HTTPError) as error: self.request(route,data)
             self.assertEqual(error.exception.code,400)
+    def test_batch_endpoint_accepts_other_platforms_during_upload_but_blocks_project_changes(self):
+        self.assertIn('parallel-publishing', self.request('/api/health')['features'])
+        self.app.publisher.vault['accounts'].update({
+            'youtube': {'access_token': 'YT', 'name': 'Channel'},
+            'facebook_page': {'access_token': 'PAGE', 'page_id': '123', 'name': 'Page'}})
+        snapshot = self.request('/api/publishing?id=' + self.identifier)
+        draft = {**snapshot['draft'], 'facebook_page_id': '123'}
+        payload = {'id': self.identifier, 'draft': draft, 'reviewed': True, 'video_signature': snapshot['video']['signature']}
+        with patch.object(pub.Publisher, '_run'):
+            self.request('/api/publishing/start', {**payload, 'platform': 'youtube'})
+            result = self.request('/api/publishing/start-many', {**payload, 'platforms': ['facebook_page']})
+        self.assertEqual(result['jobs'][0]['platform'], 'facebook_page')
+        self.assertEqual(len(self.request('/api/publishing/job')['jobs']), 2)
+        for route, body in [('/api/publishing/start-many', {**payload, 'platforms': ['youtube']}),
+                            ('/api/create', {'name': 'Another project'}),
+                            ('/api/start', {'id': self.identifier, 'action': 'build'})]:
+            with self.assertRaises(urllib.error.HTTPError) as error: self.request(route, body)
+            self.assertEqual(error.exception.code, 400)
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request('/api/publishing/start-many', {**payload, 'platforms': ['facebook_page']}, token=False)
+        self.assertEqual(error.exception.code, 403)
+
+    def test_render_job_blocks_batch_publishing(self):
+        self.app.job = {'status': 'running'}
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request('/api/publishing/start-many', {'id': self.identifier, 'platforms': ['youtube'], 'draft': {}})
+        self.assertEqual(error.exception.code, 400)
+
     def test_callback_without_state_is_rejected_without_connection(self):
         with self.assertRaises(urllib.error.HTTPError):
             self.request('/api/publishing/callback/youtube?code=not-real')

@@ -51,3 +51,21 @@
 /* Review and upload in the selected platform card. */
 .platform-card-body>.publish-submit-area{border:0;border-top:1px solid var(--line);border-radius:0;padding:20px 0 0;margin-top:20px;background:transparent}
 .platform-card-body>.publish-job{background:var(--surface)}
+
+/* Select and review several destinations before starting independent uploads. */
+.publish-batch{padding:22px;margin-top:22px;border:1px solid var(--strong-line);border-radius:24px;background:var(--panel)}
+.publish-batch h3{margin:0 0 10px;font-size:18px;font-weight:600;letter-spacing:-.015em}
+.publish-destinations{border:0;margin:16px 0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
+.publish-destinations legend{font-size:14px;font-weight:600;margin-bottom:10px}
+.publish-destinations .check{margin:0;padding:12px;min-height:44px;align-items:flex-start;border:1px solid var(--line);border-radius:14px;background:var(--surface)}
+.publish-destinations input{margin-top:3px;flex-shrink:0}
+.publish-destinations span{min-width:0;overflow-wrap:anywhere}
+.publish-destinations small,.publish-batch-details small{display:block;font-size:12px;line-height:1.6;color:var(--muted);margin:4px 0}
+.publish-batch-details{display:grid;gap:10px;margin-bottom:14px}
+.publish-batch-details .publish-selected-post{margin-top:0;max-height:220px}
+.publish-batch-details strong{display:block}
+@media(max-width:650px){.publish-batch{padding:18px}.publish-destinations{grid-template-columns:1fr}}
+
+/* A filled success badge marks this video's completed destinations. */
+.publish-status.uploaded{background:var(--success);border-color:var(--success);color:var(--panel);font-weight:600;border-radius:10px;padding:6px 12px}
+.publish-destinations small.publish-status.uploaded{display:block;width:fit-content;line-height:1.4}

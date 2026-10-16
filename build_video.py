@@ -82,8 +82,23 @@ def configure_project(project: Path) -> None:
     GAMES_DIR = PROJECT_PATH / "games"
 
 
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
 def log(msg: str):
-    print(f"[BUILD_VIDEO] {msg}", flush=True)
+    try:
+        print(f"[BUILD_VIDEO] {msg}", flush=True)
+    except UnicodeEncodeError:
+        print(f"[BUILD_VIDEO] {msg.encode('ascii', 'backslashreplace').decode('ascii')}", flush=True)
 
 
 def check_required_files():
@@ -979,6 +994,28 @@ def render_cache_key(timeline: dict, assets: dict) -> str:
                         "code": {str(path.resolve()): file_digest(path) for path in dependencies if path.is_file()}})
 
 
+def run_remotion_command(cmd):
+    """Stream render logs and retry one transient Chrome connection timeout."""
+    for attempt in range(2):
+        command = cmd if attempt == 0 else [*cmd, "--log=verbose"]
+        browser_timeout = False
+        with subprocess.Popen(command, cwd=str(ENGINE_DIR), shell=(os.name == "nt"),
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, encoding="utf-8", errors="replace") as process:
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                if re.search(r"Timed out after \d+ ms while trying to connect to the browser", line):
+                    browser_timeout = True
+            returncode = process.wait()
+        if returncode == 0:
+            return
+        if not browser_timeout:
+            raise subprocess.CalledProcessError(returncode, command)
+        if attempt == 1:
+            raise RuntimeError("Chrome did not start after two attempts. Check the browser startup log above, then retry the build.")
+        log("Chrome startup timed out. Retrying once with browser diagnostics...")
+
+
 def render_remotion_video(raw_output: Path):
     log("Rendering video with Remotion CLI...")
     npx_bin = shutil.which("npx") or ("npx.cmd" if os.name == "nt" else "npx")
@@ -988,7 +1025,7 @@ def render_remotion_video(raw_output: Path):
         str(raw_output),
         f"--public-dir={PUBLIC_DIR}"
     ]
-    subprocess.run(cmd, cwd=str(ENGINE_DIR), shell=(os.name == "nt"), check=True)
+    run_remotion_command(cmd)
     log("Remotion render complete.")
 
 
@@ -1087,7 +1124,7 @@ def main(argv=None) -> int:
                 raise ValueError("Preview time must be within the voiceover duration.")
             npx = shutil.which("npx") or "npx.cmd"
             target = OUTPUT_DIR / "studio_preview_pending.png"
-            subprocess.run([npx, "--prefix", str(CODE_DIR), "remotion", "still", str(CODE_DIR / "src/index.ts"), "MainVideo", str(target), f"--frame={min(timeline['totalFrames'] - 1, round(args.preview_at * timeline['fps']))}", f"--public-dir={PUBLIC_DIR}"], cwd=str(ENGINE_DIR), shell=(os.name == "nt"), check=True)
+            run_remotion_command([npx, "--prefix", str(CODE_DIR), "remotion", "still", str(CODE_DIR / "src/index.ts"), "MainVideo", str(target), f"--frame={min(timeline['totalFrames'] - 1, round(args.preview_at * timeline['fps']))}", f"--public-dir={PUBLIC_DIR}"])
             target.replace(OUTPUT_DIR / "studio_preview.png")
             log(f"PREVIEW COMPLETE: {OUTPUT_DIR / 'studio_preview.png'}")
             return 0

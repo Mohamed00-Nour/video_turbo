@@ -8,7 +8,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import build_video as build
 import prepare_assets as prepare
@@ -148,6 +148,45 @@ class PipelineTests(unittest.TestCase):
         (self.root / 'games.txt').write_text('01_game | https://youtu.be/test')
         with patch.object(prepare, 'estimate_game_durations', return_value=[4.]), patch.object(prepare, 'prepare_gameplay', return_value=False):
             self.assertEqual(prepare.main(['--project', str(self.root)]), 1)
+
+
+class RemotionStartupTests(unittest.TestCase):
+    timeout = "TimeoutError: Timed out after 25000 ms while trying to connect to the browser! Chrome logged the following:\n"
+
+    def process(self, status, output):
+        process = MagicMock()
+        process.__enter__.return_value = process
+        process.stdout = io.StringIO(output)
+        process.wait.return_value = status
+        return process
+
+    def test_success_streams_logs_without_retry(self):
+        with patch.object(build.subprocess, 'Popen', return_value=self.process(0, 'Rendered 10/10\n')) as launch, contextlib.redirect_stdout(io.StringIO()) as output:
+            build.run_remotion_command(['npx', 'remotion', 'render'])
+        self.assertEqual(launch.call_count, 1)
+        self.assertIn('Rendered 10/10', output.getvalue())
+
+    def test_browser_connection_timeout_retries_once_with_diagnostics(self):
+        command = ['npx', 'remotion', 'still', 'preview.png']
+        with patch.object(build.subprocess, 'Popen', side_effect=[self.process(1, self.timeout), self.process(0, 'Rendered preview\n')]) as launch, contextlib.redirect_stdout(io.StringIO()) as output:
+            build.run_remotion_command(command)
+        self.assertEqual(launch.call_count, 2)
+        self.assertEqual(launch.call_args_list[0].args[0], command)
+        self.assertEqual(launch.call_args_list[1].args[0], [*command, '--log=verbose'])
+        self.assertIn('Retrying once', output.getvalue())
+        self.assertEqual(command, ['npx', 'remotion', 'still', 'preview.png'])
+
+    def test_non_browser_render_failure_is_not_retried(self):
+        with patch.object(build.subprocess, 'Popen', return_value=self.process(1, 'Error: missing video asset\n')) as launch, contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(build.subprocess.CalledProcessError):
+                build.run_remotion_command(['npx', 'remotion', 'render'])
+        self.assertEqual(launch.call_count, 1)
+
+    def test_repeated_browser_timeout_stops_with_clear_error(self):
+        with patch.object(build.subprocess, 'Popen', side_effect=[self.process(1, self.timeout), self.process(1, self.timeout)]) as launch, contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, 'Chrome did not start after two attempts'):
+                build.run_remotion_command(['npx', 'remotion', 'render'])
+        self.assertEqual(launch.call_count, 2)
 
 
 if __name__ == '__main__':

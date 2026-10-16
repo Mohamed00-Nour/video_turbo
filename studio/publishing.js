@@ -5,7 +5,7 @@
   const labels = {youtube:'YouTube',instagram:'Instagram',tiktok:'TikTok',facebook:'Facebook profile',facebook_page:'Facebook Page'};
   const uploaders = {youtube:'https://studio.youtube.com/',instagram:'https://www.instagram.com/',tiktok:'https://www.tiktok.com/tiktokstudio/upload',facebook:'https://www.facebook.com/reels/create'};
   const terminal = new Set(['complete','failed','cancelled','interrupted']);
-  const view = {project:null,data:null,api:null,toast:()=>{},mediaUrl:null,studioBusy:false,busy:false,dirty:false,timer:null,polling:false,loading:false,loadedId:'',pending:{},lastCompleted:'',lastFailed:'',overrides:{}};
+  const view = {project:null,data:null,api:null,toast:()=>{},mediaUrl:null,studioBusy:false,busy:false,dirty:false,timer:null,polling:false,loading:false,loadedId:'',pending:{},completed:new Set(),failed:new Set(),overrides:{}};
   const dialog = $('publish-dialog');
   if (!dialog) return;
 
@@ -18,6 +18,13 @@
 <label class="field">Hashtags<input id="publish-hashtags" maxlength="1500" dir="auto" placeholder="#gaming #العاب"></label>
 <div class="publish-draft-footer"><span id="publish-draft-state" role="status">Saved with this project</span><button type="button" class="outline small" id="publish-save">Save posting details</button></div>
 <p class="hint shared-explainer">Edit any field in a platform card to customize it. Untouched fields keep following these shared details.</p></section>
+<section class="publish-batch" aria-labelledby="publish-batch-heading">
+<h3 id="publish-batch-heading">Publish to multiple platforms</h3><p class="hint">Choose your connected destinations. Each upload starts together and shows its own progress.</p>
+<fieldset class="publish-destinations"><legend>Publish this video to</legend>${['youtube','instagram','facebook_page'].map(platform => `<label class="check"><input type="checkbox" data-batch-platform="${platform}"><span>${labels[platform]}<small data-batch-state="${platform}">Connect account first</small></span></label>`).join('')}</fieldset>
+<p class="hint">TikTok and Facebook profiles use the assisted upload controls below.</p>
+<div id="publish-batch-details" class="publish-batch-details"></div>
+<label class="check publish-review"><input type="checkbox" id="publish-batch-reviewed">I watched the finished video and reviewed all selected accounts, posting details and publishing settings.</label>
+<div class="publish-submit-row"><p class="hint" id="publish-batch-requirements" role="status">Choose at least one connected platform.</p><button type="button" class="primary" id="publish-batch-submit">Publish selected platforms</button></div></section>
 <div class="platform-list-heading"><h3>Your platforms</h3><span class="muted">5 destinations · one video</span></div>
 <div class="publish-platforms"><details class="publish-card platform-youtube" data-platform-card="youtube" open>
  <summary class="publish-card-heading"><span class="publish-platform-icon" aria-hidden="true">YT</span><span class="platform-identity"><strong>YouTube</strong><small id="publish-youtube-summary">Using shared posting details</small></span><span class="publish-status" id="publish-youtube-status">Not connected</span><span class="platform-chevron" aria-hidden="true">⌄</span></summary>
@@ -37,20 +44,21 @@
 <div class="publish-submit-row"><p class="hint" id="publish-requirements">Connect an account, then review your video.</p><button type="button" class="primary" id="publish-submit">Upload to YouTube</button></div></div>
 </div><aside class="publish-preview-column"><div class="publish-preview-sticky"><div class="eyebrow">READY FOR YOUR AUDIENCE</div><h3>The final cut</h3><video id="publish-preview" class="publish-preview" controls playsinline preload="metadata"></video><a id="publish-download" class="outline full" download>Download video</a><p class="hint" id="publish-video-state">Checking the finished video...</p><div class="publish-preview-tip">One video.<br>Every destination.<p>Customize the words for each audience while your video stays the same.</p></div></div></aside></div>
 <div id="publish-error" class="publish-error" role="alert" hidden></div><div id="publish-feedback" class="publish-feedback" role="status" hidden></div>
-    <div id="publish-job" class="publish-job" hidden><div class="publish-job-top"><strong id="publish-job-stage"></strong><span id="publish-job-percent"></span></div><progress id="publish-job-progress" max="100" value="0"></progress><p id="publish-job-detail"></p><a id="publish-job-link" class="outline full" target="_blank" rel="noopener noreferrer" hidden>Open uploaded video</a></div>
     <section class="publish-history"><h3>Posting history</h3><ul id="publish-history-list" class="publish-history-list"></ul></section>
     <details class="publish-setup" id="publish-setup"><summary>Connect accounts and configure API access</summary><p class="hint">Set up your own API apps once. Credentials are stored on this computer. Blank secret fields keep your saved values.</p><div class="publish-setup-grid">
       <section class="publish-setup-card" id="publish-youtube-setup"><h3>YouTube account setup</h3><p class="hint">Create a Google OAuth client for a Desktop app and enable the YouTube Data API. Add your Google account as a test user while the app is in testing.</p><a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" class="outline small">Open Google API credentials</a><label class="field">OAuth client ID<input id="publish-youtube-id" autocomplete="off" spellcheck="false"></label><label class="field">OAuth client secret<input id="publish-youtube-secret" type="password" autocomplete="new-password" placeholder="Paste a secret, or leave blank to keep it"></label><div class="publish-form-buttons"><button type="button" class="outline small" data-save-settings="youtube">Save YouTube setup</button></div><p id="publish-youtube-configured" class="publish-setup-status"></p><p class="hint">Sign-in returns to <code id="publish-youtube-redirect"></code>.</p><details class="publish-callback"><summary>Finish sign-in manually</summary><label class="field">Completed browser redirect URL<input type="password" autocomplete="off" id="publish-youtube-callback" placeholder="Paste the complete redirect URL"></label><button type="button" class="outline small full" data-finish="youtube">Complete connection</button></details></section>
-      <section class="publish-setup-card" id="publish-instagram-setup"><h3>Instagram local uploads</h3><p class="hint">Connect once, then upload every finished MP4 directly from Studio.</p><p id="publish-instagram-page-state" class="publish-setup-status"></p><ol class="hint"><li>Use an Instagram Business or Creator account and link it to your Facebook Page under <strong>Linked accounts</strong>.</li><li>In your Meta app, enable Instagram access through Facebook Login. Request <code>instagram_basic</code>, <code>instagram_content_publish</code> and <code>pages_read_engagement</code> when generating the token. Authorize the intended Instagram account.</li><li>Reconnect the Facebook Page with the updated token, then connect its linked Instagram account below.</li></ol><button type="button" class="outline small full" id="publish-instagram-page-connect" data-instagram-page="true">Connect linked Instagram account</button><details class="publish-callback"><summary>Alternative: Instagram Login with a hosted video</summary><p class="hint">This alternative uses a public HTTPS video link. Configure a Meta app with Instagram Login and publishing permissions.</p><a href="https://developers.facebook.com/apps/" target="_blank" rel="noopener noreferrer" class="outline small">Open Meta apps</a><label class="field">Instagram app ID<input id="publish-instagram-id" autocomplete="off" spellcheck="false"></label><label class="field">Instagram app secret<input id="publish-instagram-secret" type="password" autocomplete="new-password" placeholder="Paste a secret, or leave blank to keep it"></label><label class="field">Registered HTTPS redirect URI<input id="publish-instagram-redirect-input" type="url" placeholder="https://your-site.example/callback" autocomplete="off"></label><div class="publish-form-buttons"><button type="button" class="outline small" data-save-settings="instagram">Save Instagram setup</button></div><button type="button" class="outline small" data-connect="instagram">Connect with Instagram Login</button><p id="publish-instagram-configured" class="publish-setup-status"></p><details class="publish-callback"><summary>Finish sign-in manually</summary><p class="hint">After authorizing Instagram, copy the complete final URL from your browser's address bar and paste it here.</p><label class="field">Completed browser redirect URL<input type="password" autocomplete="off" id="publish-instagram-callback" placeholder="Paste the complete redirect URL"></label><button type="button" class="outline small full" data-finish="instagram">Complete connection</button></details><details class="publish-callback"><summary>Connect with an Instagram access token instead</summary><p class="hint">Use a token issued for your own Instagram Professional account with publishing permissions. It is sent only to your local Studio and never shown after saving.</p><label class="field">Instagram access token<input id="publish-instagram-token" type="password" autocomplete="off" placeholder="Paste your access token"></label><button type="button" class="outline small full" id="publish-token-connect">Connect token</button></details></details></section>
-      <section class="publish-setup-card" id="publish-facebook_page-setup"><h3>Facebook Page account setup</h3><p class="hint">Connect the Page you manage with your Facebook profile. The token identifies the Page; its name appears above before you publish.</p><a href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noopener noreferrer" class="outline small">Open Meta Graph API Explorer</a><details class="publish-callback"><summary>How to get a Page access token</summary><ol class="hint"><li>In your Meta app, enable the Page publishing use case: <strong>Manage everything on your Page</strong>.</li><li>In Graph API Explorer, select that app and get a <strong>User Access Token</strong> with <code>pages_show_list</code>, <code>pages_read_engagement</code> and <code>pages_manage_posts</code>. For a Page in a business portfolio, also request <code>business_management</code> to list its Pages. Generate a new token after adding permissions and authorize the intended business and Page.</li><li>Open <strong>User or Page</strong> and select your Page under <strong>Page Access Tokens</strong>. Alternatively, run <code>GET me/accounts?fields=id,name,access_token,tasks</code> with the user token and copy the access token belonging to your Page.</li><li>Paste that Page token below. Its Page ID is detected automatically.</li></ol></details><label class="field">Page ID (required for a User token managing multiple Pages)<input id="publish-facebook_page-id" inputmode="numeric" autocomplete="off" placeholder="Detected from the Page access token"></label><label class="field">Meta access token<input id="publish-facebook_page-token" type="password" autocomplete="off" placeholder="Paste the Page token, or a User token that can access this Page"></label><div class="publish-form-buttons"><button type="button" class="outline small" id="publish-facebook_page-connect">Connect Page</button></div><p class="hint">Page tokens connect directly. If Graph API Explorer returns a User token, Studio retrieves the token for the Page ID above. Tokens are validated before saving.</p><p class="hint">For Instagram local uploads, also add <code>instagram_basic</code> and <code>instagram_content_publish</code>, authorize the linked Instagram account, and generate a fresh token.</p></section>
+      <section class="publish-setup-card" id="publish-instagram-setup"><h3>Instagram local uploads</h3><p class="hint">For the Analytics dashboard, also grant <code>instagram_manage_insights</code> and <code>pages_read_engagement</code> when reconnecting the Facebook Page. Instagram Login tokens instead need <code>instagram_business_manage_insights</code>.</p><p class="hint">Connect once, then upload every finished MP4 directly from Studio.</p><p id="publish-instagram-page-state" class="publish-setup-status"></p><ol class="hint"><li>Use an Instagram Business or Creator account and link it to your Facebook Page under <strong>Linked accounts</strong>.</li><li>In your Meta app, enable Instagram access through Facebook Login. Request <code>instagram_basic</code>, <code>instagram_content_publish</code> and <code>pages_read_engagement</code> when generating the token. Authorize the intended Instagram account.</li><li>Reconnect the Facebook Page with the updated token, then connect its linked Instagram account below.</li></ol><button type="button" class="outline small full" id="publish-instagram-page-connect" data-instagram-page="true">Connect linked Instagram account</button><details class="publish-callback"><summary>Alternative: Instagram Login with a hosted video</summary><p class="hint">This alternative uses a public HTTPS video link. Configure a Meta app with Instagram Login and publishing permissions.</p><a href="https://developers.facebook.com/apps/" target="_blank" rel="noopener noreferrer" class="outline small">Open Meta apps</a><label class="field">Instagram app ID<input id="publish-instagram-id" autocomplete="off" spellcheck="false"></label><label class="field">Instagram app secret<input id="publish-instagram-secret" type="password" autocomplete="new-password" placeholder="Paste a secret, or leave blank to keep it"></label><label class="field">Registered HTTPS redirect URI<input id="publish-instagram-redirect-input" type="url" placeholder="https://your-site.example/callback" autocomplete="off"></label><div class="publish-form-buttons"><button type="button" class="outline small" data-save-settings="instagram">Save Instagram setup</button></div><button type="button" class="outline small" data-connect="instagram">Connect with Instagram Login</button><p id="publish-instagram-configured" class="publish-setup-status"></p><details class="publish-callback"><summary>Finish sign-in manually</summary><p class="hint">After authorizing Instagram, copy the complete final URL from your browser's address bar and paste it here.</p><label class="field">Completed browser redirect URL<input type="password" autocomplete="off" id="publish-instagram-callback" placeholder="Paste the complete redirect URL"></label><button type="button" class="outline small full" data-finish="instagram">Complete connection</button></details><details class="publish-callback"><summary>Connect with an Instagram access token instead</summary><p class="hint">Use a token issued for your own Instagram Professional account with publishing permissions. It is sent only to your local Studio and never shown after saving.</p><label class="field">Instagram access token<input id="publish-instagram-token" type="password" autocomplete="off" placeholder="Paste your access token"></label><button type="button" class="outline small full" id="publish-token-connect">Connect token</button></details></details></section>
+      <section class="publish-setup-card" id="publish-facebook_page-setup"><h3>Facebook Page account setup</h3><p class="hint">For analytics, include <code>pages_read_engagement</code> and <code>read_insights</code>. For the linked Instagram account, also include <code>instagram_manage_insights</code>. A fresh token must include the analytics permissions you granted.</p><p class="hint">Connect the Page you manage with your Facebook profile. The token identifies the Page; its name appears above before you publish.</p><a href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noopener noreferrer" class="outline small">Open Meta Graph API Explorer</a><details class="publish-callback"><summary>How to get a Page access token</summary><ol class="hint"><li>In your Meta app, enable the Page publishing use case: <strong>Manage everything on your Page</strong>.</li><li>In Graph API Explorer, select that app and get a <strong>User Access Token</strong> with <code>pages_show_list</code>, <code>pages_read_engagement</code> and <code>pages_manage_posts</code>. For a Page in a business portfolio, also request <code>business_management</code> to list its Pages. Generate a new token after adding permissions and authorize the intended business and Page.</li><li>Extend the <strong>User Access Token</strong> first: open <a href="https://developers.facebook.com/tools/debug/accesstoken/" target="_blank" rel="noopener noreferrer">Meta Access Token Debugger</a>, inspect the token, and use <strong>Extend Access Token</strong> if available. Otherwise follow <a href="https://developers.facebook.com/docs/facebook-login/guides/access-tokens/get-long-lived/" target="_blank" rel="noopener noreferrer">Meta's long-lived token guide</a>. Copy the resulting long-lived User token back into Graph API Explorer.</li><li>With that <strong>long-lived User token</strong>, run <code>GET me/accounts?fields=id,name,access_token,tasks</code> and copy the access token belonging to your Page. A Page token obtained from a temporary User token can expire within hours.</li><li>Check the resulting Page token in the debugger, then paste it below. Its Page ID is detected automatically. Your linked Instagram account reuses this Page connection.</li></ol></details><label class="field">Page ID (required for a User token managing multiple Pages)<input id="publish-facebook_page-id" inputmode="numeric" autocomplete="off" placeholder="Detected from the Page access token"></label><label class="field">Meta access token<input id="publish-facebook_page-token" type="password" autocomplete="off" placeholder="Paste the Page token, or a User token that can access this Page"></label><div class="publish-form-buttons"><button type="button" class="outline small" id="publish-facebook_page-connect">Connect Page</button></div><p class="hint">Use a long-lived Page token, or a User token you have already extended. Studio validates and saves the token, but does not extend temporary Meta tokens. Replacing this Page token also updates access for Instagram linked to the same Page.</p><p class="hint">For Instagram local uploads, also add <code>instagram_basic</code> and <code>instagram_content_publish</code>, authorize the linked Instagram account, and generate a fresh token.</p></section>
     </div></details>`;
 
   function secureLink(value) {
     try { const parsed = new URL(value); return parsed.protocol === 'https:' ? parsed.href : ''; } catch (_) { return ''; }
   }
   function sameProject() { return view.data && view.loadedId === view.project?.id; }
-  function runningJob() { return view.data?.job && !terminal.has(view.data.job.status); }
-  function reviewedReset() { $('publish-reviewed').checked = false; lock(); }
+  function publishingJobs() { return view.data?.jobs || (view.data?.job ? [view.data.job] : []); }
+  function runningJob(platform) { return publishingJobs().some(job => job.status === 'running' && (!platform || job.platform === platform)); }
+  function selectedPlatforms() { return Array.from(dialog.querySelectorAll('[data-batch-platform]:checked'), input => input.dataset.batchPlatform); }
+  function reviewedReset() { $('publish-reviewed').checked = false; $('publish-batch-reviewed').checked = false; lock(); }
   function draftChanged() { renderPlatformDetails(); view.dirty = true; $('publish-draft-state').textContent = 'Unsaved posting details'; reviewedReset(); }
   function draft() {
     return {title:$('publish-title').value.trim(),description:$('publish-description').value,hashtags:$('publish-hashtags').value.trim(),youtube_privacy:$('publish-privacy').value,made_for_kids:$('publish-kids').checked,instagram_share_to_feed:$('publish-feed').checked,instagram_video_url:$('publish-instagram-url').value.trim(),facebook_page_id:view.data?.accounts?.facebook_page?.page_id || '',platform_overrides:view.overrides};
@@ -88,6 +96,7 @@
     const platform = $('publish-platform').value;
     $('publish-selected-title').textContent = postingDetails(platform).title || 'Untitled video';
     $('publish-selected-caption').textContent = caption(platform) || 'No caption or hashtags.';
+    renderBatchDetails();
   }
   function feedback(message, error = false) {
     const target = error ? $('publish-error') : $('publish-feedback'); target.textContent = message; target.hidden = !message;
@@ -135,6 +144,14 @@
     const size = view.data?.video?.size;
     $('publish-video-state').textContent = ready ? 'Finished MP4' + (size ? ' - ' + (size/1024/1024).toFixed(1) + ' MB' : '') : 'Build your video before publishing.';
   }
+  function isUploaded(platform) {
+    if (!sameProject() || !view.data.video?.ready) return false;
+    const account = view.data.accounts?.[platform];
+    const destination = platform === 'facebook_page' ? account?.page_id : platform === 'instagram' ? account?.user_id : '';
+    return (view.data.history || []).some(entry => entry.platform === platform &&
+      entry.video_signature === view.data.video.signature && ['complete','manual'].includes(entry.status) &&
+      (!destination || !entry.destination_id || entry.destination_id === destination));
+  }
   function renderAccounts() {
     for (const platform of ['youtube','instagram']) {
       const account = view.data?.accounts?.[platform] || {};
@@ -166,6 +183,13 @@
       $('publish-instagram-account').textContent = instagram.connected ? instagram.name + ' - connected through ' + instagram.source_page_name : 'Reconnect the same Facebook Page to restore this Instagram connection.';
     }
     $('publish-youtube-redirect').textContent = view.data?.accounts?.youtube?.redirect_uri || window.location.origin + '/api/publishing/callback/youtube';
+    for (const platform of Object.keys(labels)) {
+      const status = dialog.querySelector('[data-platform-card="' + platform + '"] .publish-status');
+      if (platform === 'tiktok' || platform === 'facebook') status.textContent = 'Assisted upload';
+      const uploaded = isUploaded(platform);
+      status.classList.toggle('uploaded', uploaded);
+      if (uploaded) status.textContent = 'uploaded';
+    }
   }
   function renderHistory() {
     const history = view.data?.history || [];
@@ -173,53 +197,71 @@
       const link = secureLink(entry.url); const stamp = Number(entry.finished || entry.created || entry.started || 0);
       const date = stamp ? new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'}).format(new Date(stamp < 1e12 ? stamp*1000 : stamp)) : '';
       const status = entry.status === 'complete' ? (entry.platform === 'youtube' ? 'Uploaded' : 'Published') : entry.status === 'manual' || entry.status === 'published' ? 'Marked published' : entry.status || '';
-      return `<li class="publish-history-item"><div><strong>${esc(labels[entry.platform] || entry.platform)}${entry.destination_name ? ' - ' + esc(entry.destination_name) : ''} &middot; ${esc(status)}</strong><small dir="auto">${esc(entry.title || view.project?.editor?.name || '')}</small><small>${esc(date)}${entry.error ? ' - ' + esc(entry.error) : ''}</small></div>${entry.platform === 'facebook_page' && ['failed','interrupted'].includes(entry.status) && entry.remote_id ? `<button type="button" class="outline small" data-verify-facebook="${esc(entry.id)}">Check existing upload</button>` : ''}${entry.platform === 'instagram' && entry.instagram_connection_type === 'facebook' && ['failed','interrupted'].includes(entry.status) && entry.container_id ? `<button type="button" class="outline small" data-verify-instagram="${esc(entry.id)}">Check existing upload</button>` : ''}${link ? `<a href="${esc(link)}" target="_blank" rel="noopener noreferrer">Open post &nearr;</a>` : ''}</li>`;
+      const canRetry = (entry.platform === 'facebook_page' || entry.platform === 'instagram' && entry.instagram_connection_type === 'facebook') && ['failed','interrupted'].includes(entry.status)
+        && (entry.network_reason || entry.status === 'interrupted') && view.data?.accounts?.[entry.platform]?.connected
+        && entry.video_signature === view.data?.video?.signature
+        && entry.destination_id === (entry.platform === 'facebook_page' ? view.data.accounts[entry.platform].page_id : view.data.accounts[entry.platform].user_id)
+        && ((!entry.publish_attempted && entry.processing_status !== 'PUBLISHED') || entry.confirmed_unpublished);
+      return `<li class="publish-history-item"><div><strong>${esc(labels[entry.platform] || entry.platform)}${entry.destination_name ? ' - ' + esc(entry.destination_name) : ''} &middot; ${esc(status)}</strong><small dir="auto">${esc(entry.title || view.project?.editor?.name || '')}</small><small>${esc(date)}${entry.error ? ' - ' + esc(entry.error) : ''}</small></div>${entry.platform === 'facebook_page' && ['failed','interrupted'].includes(entry.status) && entry.remote_id ? `<button type="button" class="outline small" data-verify-facebook="${esc(entry.id)}">Check existing upload</button>` : ''}${entry.platform === 'instagram' && entry.instagram_connection_type === 'facebook' && ['failed','interrupted'].includes(entry.status) && entry.container_id ? `<button type="button" class="outline small" data-verify-instagram="${esc(entry.id)}">Check existing upload</button>` : ''}${canRetry ? `<button type="button" class="outline small" data-direct="${esc(entry.platform)}" data-retry-upload="true">Retry upload</button>` : ''}${link ? `<a href="${esc(link)}" target="_blank" rel="noopener noreferrer">Open post &nearr;</a>` : ''}</li>`;
     }).join('') : '<li class="publish-empty">Uploads and posts you mark as published will appear here.</li>';
   }
   function renderJob() {
-    const job = view.data?.job; const relevant = job && job.project === view.project?.id;
-    $('publish-job').hidden = !relevant;
-    if (!relevant) return;
-    const card = dialog.querySelector('[data-platform-card="' + job.platform + '"]');
-    if (card) { card.querySelector('.platform-card-body').append($('publish-job')); if (!terminal.has(job.status)) card.open = true; }
-    const authFailure = (job.platform === 'facebook_page' || job.platform === 'instagram' && job.instagram_connection_type === 'facebook') && ['failed','interrupted'].includes(job.status) && (job.reconnect_required || job.error_code === 190 || /\bcode 190\b/.test(job.error || ''));
-    const needsReconnect = authFailure && !view.data?.accounts?.facebook_page?.connected;
-    if (['failed','interrupted'].includes(job.status) && view.lastFailed !== job.id) {
-      view.lastFailed = job.id; $('publish-feedback').hidden = true;
+    const jobs = publishingJobs().filter(job => job.project === view.project?.id);
+    for (const element of dialog.querySelectorAll('[data-platform-job]')) {
+      if (!jobs.some(job => job.platform === element.dataset.platformJob)) element.remove();
     }
-    let pageRecovery = $('publish-facebook-recovery');
-    if (!pageRecovery) {
-      pageRecovery = document.createElement('div'); pageRecovery.id = 'publish-facebook-recovery'; pageRecovery.className = 'publish-manual-form';
-      pageRecovery.innerHTML = '<p class="hint">Reconnect this Page with a fresh Page access token from Meta Graph API Explorer. Then review the video and try again.</p><button type="button" class="outline small" data-setup="facebook_page">Reconnect Facebook Page</button>';
-      $('publish-job').append(pageRecovery);
+    for (const job of jobs) {
+      const card = dialog.querySelector('[data-platform-card="' + job.platform + '"]');
+      if (!card) continue;
+      let panel = card.querySelector('[data-platform-job]');
+      if (!panel) {
+        panel = document.createElement('div'); panel.className = 'publish-job'; panel.dataset.platformJob = job.platform;
+        panel.innerHTML = `<div class="publish-job-top"><strong data-job-stage role="status"></strong><span data-job-percent></span></div><progress data-job-progress max="100" value="0" aria-label="${esc(labels[job.platform])} upload progress"></progress><p data-job-detail></p><a data-job-link class="outline full" target="_blank" rel="noopener noreferrer" hidden>Open uploaded video</a><div data-page-recovery class="publish-manual-form" hidden><p class="hint"></p><button type="button" class="outline small" data-setup="facebook_page">Reconnect Facebook Page</button></div><div data-youtube-recovery class="publish-manual-form" hidden><p class="hint">If this video appears in YouTube Studio, check it here before uploading again.</p><label class="field">Existing YouTube video link<input type="url" data-existing-youtube-url placeholder="https://www.youtube.com/watch?v=..."></label><button type="button" class="outline small" data-verify-youtube>Check existing upload</button></div>`;
+        card.querySelector('.platform-card-body').append(panel);
+      }
+      if (job.status === 'running') card.open = true;
+      const authFailure = (job.platform === 'facebook_page' || job.platform === 'instagram' && job.instagram_connection_type === 'facebook') && ['failed','interrupted'].includes(job.status) && (job.reconnect_required || job.error_code === 190 || /\bcode 190\b/.test(job.error || ''));
+      const needsReconnect = authFailure && !view.data?.accounts?.facebook_page?.connected;
+      const pageRecovery = panel.querySelector('[data-page-recovery]'); pageRecovery.hidden = !needsReconnect;
+      pageRecovery.querySelector('p').textContent = job.publish_attempted ? 'Reconnect this Page with a fresh Page access token, then use Check existing upload in posting history before trying again.' : 'Reconnect this Page with a fresh Page access token, then review the video and retry.';
+      const progress = Math.max(0,Math.min(100,Number(job.progress) || 0));
+      panel.querySelector('[data-job-stage]').textContent = labels[job.platform] + ' - ' + (needsReconnect ? 'Reconnect Facebook Page' : authFailure ? 'Previous upload failed' : job.stage || job.status);
+      panel.querySelector('[data-job-percent]').textContent = Math.round(progress) + '%'; panel.querySelector('[data-job-progress]').value = progress;
+      panel.querySelector('[data-job-detail]').textContent = authFailure && !needsReconnect ? 'The Page is connected again. Review the video and posting details before retrying.' : job.error || job.warning || (job.status === 'complete' ? 'The upload finished successfully.' : 'You may close this panel. Keep Studio running until the upload finishes.');
+      const link = secureLink(job.url); const button = panel.querySelector('[data-job-link]'); button.hidden = !link; if (link) button.href = link;
+      panel.querySelector('[data-youtube-recovery]').hidden = job.platform !== 'youtube' || !['failed','interrupted'].includes(job.status);
+      panel.querySelector('[data-verify-youtube]').dataset.verifyYoutube = job.id;
+      if (['failed','interrupted'].includes(job.status) && !view.failed.has(job.id)) { view.failed.add(job.id); $('publish-feedback').hidden = true; }
+      if (job.status === 'complete' && !view.completed.has(job.id)) { view.completed.add(job.id); view.toast(labels[job.platform] + ' upload finished.'); }
     }
-    pageRecovery.hidden = !needsReconnect;
-    if (needsReconnect && job.remote_id && job.publish_attempted) pageRecovery.querySelector('p').textContent = 'Reconnect this Page with a fresh Page access token, then use Check existing upload in posting history before trying again.';
-    else if (needsReconnect) pageRecovery.querySelector('p').textContent = 'Facebook rejected the access token. Reconnect this Page with a fresh Page access token from Meta Graph API Explorer, then review the video and retry.';
-    const progress = Math.max(0,Math.min(100,Number(job.progress) || 0));
-    $('publish-job-stage').textContent = needsReconnect ? 'Reconnect Facebook Page' : authFailure ? 'Previous upload failed' : job.stage || (terminal.has(job.status) ? job.status : 'Uploading');
-    $('publish-job-percent').textContent = Math.round(progress) + '%'; $('publish-job-progress').value = progress;
-    $('publish-job-detail').textContent = authFailure && !needsReconnect ? 'The Page is connected again. Review the video and posting details before retrying.' : job.error || job.warning || (job.status === 'complete' ? 'The upload finished successfully.' : 'You may close this panel. Keep Studio running until the upload finishes.');
-    const link = secureLink(job.url); $('publish-job-link').hidden = !link; if (link) $('publish-job-link').href = link;
-    let recovery = $('publish-youtube-recovery');
-    if (!recovery) {
-      recovery = document.createElement('div'); recovery.id = 'publish-youtube-recovery'; recovery.className = 'publish-manual-form';
-      recovery.innerHTML = '<p class="hint">If this video appears in YouTube Studio, check it here before uploading again.</p><label class="field">Existing YouTube video link<input type="url" id="publish-existing-youtube-url" placeholder="https://www.youtube.com/watch?v=..."></label><button type="button" class="outline small" id="publish-verify-youtube">Check existing upload</button>';
-      $('publish-job').append(recovery);
-      $('publish-verify-youtube').onclick = () => action(async()=> {
-        const checked = await view.api('/api/publishing/verify-youtube',{id:view.project.id,job_id:view.data.job.id,url:$('publish-existing-youtube-url').value.trim()});
-        await refresh(); feedback(checked.message); reviewedReset();
-      });
-    }
-    recovery.hidden = job.platform !== 'youtube' || !['failed','interrupted'].includes(job.status);
-
-    if (job.status === 'complete' && view.lastCompleted !== job.id) { view.lastCompleted = job.id; view.toast(labels[job.platform] + ' upload finished.'); }
+  }
+  function renderBatchDetails() {
+    $('publish-batch-details').innerHTML = selectedPlatforms().map(platform => {
+      const account = view.data?.accounts?.[platform];
+      const settings = platform === 'youtube' ? 'Visibility: ' + $('publish-privacy').selectedOptions[0].textContent + ' ? ' + ($('publish-kids').checked ? 'Made for kids' : 'Not made for kids') : platform === 'instagram' ? ($('publish-feed').checked ? 'Also shown on Instagram feed' : 'Reel only') : 'Publish to this Facebook Page';
+      return `<article class="publish-selected-post"><strong>${esc(labels[platform])} - ${esc(account?.name || 'Account not connected')}</strong><small>${esc(settings)}</small><strong dir="auto">${esc(postingDetails(platform).title || 'Untitled video')}</strong><p dir="auto">${esc(caption(platform) || 'No caption or hashtags.')}</p></article>`;
+    }).join('');
+  }
+  function platformProblem(platform) {
+    if (!sameProject()) return 'Loading publishing details...';
+    if (!view.data.video?.ready) return 'Build your video first.';
+    if (runningJob(platform)) return 'An upload to this platform is already running.';
+    const account = view.data.accounts?.[platform];
+    if (!account?.connected) return 'Connect your ' + labels[platform] + ' account first.';
+    const matching = (view.data.history || []).filter(entry => entry.platform === platform && entry.video_signature === view.data.video.signature && (platform === 'youtube' || !entry.destination_id || entry.destination_id === (platform === 'facebook_page' ? account.page_id : account.user_id)));
+    if (matching.some(entry => ['complete','manual'].includes(entry.status))) return 'This video is already recorded as uploaded. Check posting history.';
+    if (platform !== 'youtube' && matching.some(entry => ['failed','interrupted'].includes(entry.status) && (entry.publish_attempted || entry.processing_status === 'PUBLISHED') && !entry.confirmed_unpublished)) return 'Check the existing upload in posting history before trying again.';
+    const post = postingDetails(platform);
+    if (platform === 'youtube' && (!post.title.trim() || /[<>]/.test(post.title))) return 'Add a YouTube title without angle brackets.';
+    if (caption(platform).length > (platform === 'instagram' ? 2200 : platform === 'youtube' ? 5000 : Infinity)) return 'Shorten the caption or hashtags to fit the character limit.';
+    if (platform === 'instagram' && account.upload_mode !== 'local' && !secureLink($('publish-instagram-url').value)) return 'Provide a public HTTPS link to the finished MP4, or connect for local uploads.';
+    return '';
   }
   function optionsChanged() {
     const platform = $('publish-platform').value;
     const card = dialog.querySelector('[data-platform-card="' + platform + '"]');
     const body = card.querySelector('.platform-card-body');
-    body.insertBefore($('publish-submit-area'),$('publish-job').parentElement === body ? $('publish-job') : null);
+    body.insertBefore($('publish-submit-area'),body.querySelector('[data-platform-job]'));
     card.open = true;
     $('publish-review-heading').textContent = 'Review & upload to ' + labels[platform];
     for (const button of dialog.querySelectorAll('[data-direct]')) button.setAttribute('aria-expanded',String(button.dataset.direct === platform));
@@ -235,18 +277,27 @@
     $('publish-open').disabled = blocked || !view.project?.final;
     const platform = $('publish-platform').value;
     const account = view.data?.accounts?.[platform];
-    const instagramUnconfirmed = platform === 'instagram' && (view.data?.history || []).some(entry => entry.platform === 'instagram' && entry.video_signature === view.data?.video?.signature && (!entry.destination_id || entry.destination_id === account?.user_id) && ['failed','interrupted'].includes(entry.status) && (entry.publish_attempted || entry.processing_status === 'PUBLISHED') && !entry.confirmed_unpublished);
-    let reason = !sameProject() ? 'Loading publishing details...' : !view.data.video?.ready ? 'Build your video first.' : uploading ? 'An upload is already running. Wait for it to finish.' : !account?.connected ? 'Connect your ' + labels[platform] + ' account first.' : platform === 'youtube' && !postingDetails(platform).title.trim() ? 'Add a video title.' : platform === 'instagram' && account?.upload_mode !== 'local' && !secureLink($('publish-instagram-url').value) ? 'Provide a public HTTPS link to the finished MP4, or use assisted upload.' : instagramUnconfirmed ? 'Check the existing Instagram upload in posting history before trying again.' : !$('publish-reviewed').checked ? 'Watch your video, then confirm the review above.' : platform === 'youtube' ? 'Visibility: ' + $('publish-privacy').selectedOptions[0].textContent + '. Upload starts when you click.' : platform === 'facebook_page' ? 'Publishes to ' + account.name + ' when you click.' : 'Your Reel will be published when you click.';
-    const overLimit = caption(platform).length > (platform === 'instagram' ? 2200 : platform === 'youtube' ? 5000 : Infinity);
-    $('publish-requirements').textContent = overLimit ? 'Shorten this platform’s caption or hashtags to fit its character limit.' : reason;
-    $('publish-submit').disabled = instagramUnconfirmed || overLimit || blocked || uploading || !sameProject() || !view.data?.video?.ready || !account?.connected || !$('publish-reviewed').checked || platform === 'youtube' && !postingDetails(platform).title.trim() || platform === 'instagram' && account?.upload_mode !== 'local' && !secureLink($('publish-instagram-url').value);
-    for (const item of dialog.querySelectorAll('[data-connect]')) item.disabled = blocked || !view.data?.accounts?.[item.dataset.connect]?.configured;
-    for (const item of dialog.querySelectorAll('[data-check-account],[data-disconnect],[data-save-settings],#publish-token-connect,#publish-facebook_page-connect,[data-verify-facebook],[data-verify-instagram]')) item.disabled = blocked || uploading;
+    const problem = platformProblem(platform);
+    $('publish-requirements').textContent = problem || (!$('publish-reviewed').checked ? 'Watch your video, then confirm the review above.' : platform === 'youtube' ? 'Visibility: ' + $('publish-privacy').selectedOptions[0].textContent + '. Upload starts when you click.' : 'Publishes to ' + account.name + ' when you click.');
+    $('publish-submit').disabled = blocked || Boolean(problem) || !$('publish-reviewed').checked;
+    const selected = selectedPlatforms();
+    const batchProblems = selected.map(platform => { const reason = platformProblem(platform); return reason ? labels[platform] + ': ' + reason : ''; }).filter(Boolean);
+    $('publish-batch-requirements').textContent = batchProblems.join(' ') || (!selected.length ? 'Choose at least one connected platform.' : !$('publish-batch-reviewed').checked ? 'Review all selected destinations and confirm above.' : selected.length + ' platform' + (selected.length === 1 ? '' : 's') + ' will start together.');
+    $('publish-batch-submit').disabled = blocked || !selected.length || batchProblems.length > 0 || !$('publish-batch-reviewed').checked;
+    for (const input of dialog.querySelectorAll('[data-batch-platform]')) {
+      const platform = input.dataset.batchPlatform; const account = view.data?.accounts?.[platform];
+      input.disabled = blocked || !account?.connected || runningJob(platform);
+      const status = dialog.querySelector('[data-batch-state="' + platform + '"]');
+      const uploaded = isUploaded(platform);
+      status.textContent = uploaded ? 'uploaded' : runningJob(platform) ? 'Uploading...' : platformProblem(platform) || account?.name || 'Connected';
+      status.classList.toggle('publish-status', uploaded);
+      status.classList.toggle('uploaded', uploaded);
+    }
+    for (const item of dialog.querySelectorAll('[data-connect]')) item.disabled = blocked || uploading || !view.data?.accounts?.[item.dataset.connect]?.configured;
+    for (const item of dialog.querySelectorAll('[data-check-account],[data-disconnect],[data-save-settings],#publish-token-connect,#publish-facebook_page-connect,[data-verify-facebook],[data-verify-instagram],[data-verify-youtube],[data-existing-youtube-url],[data-mark],[data-mark-finish],[data-post-url],#publish-save')) item.disabled = blocked || uploading;
     for (const item of dialog.querySelectorAll('[data-instagram-page]')) item.disabled = blocked || uploading || !view.data?.accounts?.facebook_page?.connected;
-    for (const item of dialog.querySelectorAll('[data-uploader],[data-copy],[data-mark]')) item.disabled = blocked || !view.data?.video?.ready;
-    for (const item of dialog.querySelectorAll('[data-direct]')) item.disabled = blocked || uploading || !view.data?.video?.ready;
-    if (uploading) for (const item of dialog.querySelectorAll('[data-post-field],[data-reset-platform]')) item.disabled = true;
-    if (uploading) for (const item of dialog.querySelectorAll('#publish-title,#publish-description,#publish-hashtags,#publish-privacy,#publish-kids,#publish-feed,#publish-instagram-url,#publish-platform,#publish-save,#publish-reviewed')) item.disabled = true;
+    for (const item of dialog.querySelectorAll('[data-uploader],[data-copy]')) item.disabled = blocked || !view.data?.video?.ready;
+    for (const item of dialog.querySelectorAll('[data-direct]')) item.disabled = blocked || runningJob(item.dataset.direct) || !view.data?.video?.ready;
   }
   async function refresh(initial = false) {
     if (!view.api || !view.project || view.polling) return;
@@ -260,7 +311,7 @@
       view.data = data; view.loadedId = id;
       if (initial) { loadDraft(data.draft); loadSetup(); }
       else if ((previousSignature && previousSignature !== data.video?.signature) || (previousPage && previousPage !== data.accounts?.facebook_page?.page_id) || previousInstagram !== JSON.stringify([data.accounts?.instagram?.user_id,data.accounts?.instagram?.connection_type])) reviewedReset();
-      renderAccounts(); renderHistory(); renderJob(); updateVideo(); lock();
+      renderAccounts(); renderHistory(); renderJob(); renderBatchDetails(); updateVideo(); lock();
     } finally { view.polling = false; }
   }
   function ensurePolling() {
@@ -327,8 +378,21 @@
     const platform = $('publish-platform').value;
     if (!$('publish-reviewed').checked) throw new Error('Review the finished video before uploading.');
     const result = await view.api('/api/publishing/start',{id:view.project.id,platform,draft:draft(),reviewed:true,video_signature:view.data?.video?.signature});
-    view.data.job = result.job; view.dirty = false; $('publish-draft-state').textContent = 'Saved with this project'; $('publish-reviewed').checked = false;
+    view.data.jobs = [...publishingJobs().filter(job => job.platform !== platform), result.job];
+    view.data.job = result.job; view.dirty = false; $('publish-draft-state').textContent = 'Saved with this project'; $('publish-reviewed').checked = false; $('publish-batch-reviewed').checked = false;
+    dialog.querySelector('[data-batch-platform="' + platform + '"]').checked = false; renderBatchDetails();
     renderJob(); ensurePolling(); feedback(labels[platform] + ' upload started. Keep Studio running.');
+  });
+  for (const input of dialog.querySelectorAll('[data-batch-platform]')) input.addEventListener('change',()=> { renderBatchDetails(); reviewedReset(); });
+  $('publish-batch-reviewed').addEventListener('change',()=>lock());
+  $('publish-batch-submit').onclick = () => action(async()=> {
+    const platforms = selectedPlatforms();
+    if (!platforms.length || !$('publish-batch-reviewed').checked) throw new Error('Select your platforms and review all destinations before publishing.');
+    const result = await view.api('/api/publishing/start-many',{id:view.project.id,platforms,draft:draft(),reviewed:true,video_signature:view.data?.video?.signature});
+    view.data.jobs = [...publishingJobs().filter(job => !platforms.includes(job.platform)), ...result.jobs];
+    view.data.job = result.jobs[result.jobs.length - 1]; view.dirty = false; $('publish-draft-state').textContent = 'Saved with this project';
+    for (const input of dialog.querySelectorAll('[data-batch-platform]')) if (platforms.includes(input.dataset.batchPlatform)) input.checked = false;
+    renderBatchDetails(); reviewedReset(); renderJob(); ensurePolling(); feedback(platforms.map(platform => labels[platform]).join(', ') + ' uploads started. Keep Studio running.');
   });
   $('publish-token-connect').onclick = () => action(async()=> {
     const input = $('publish-instagram-token'); const token = input.value.trim();
@@ -347,13 +411,13 @@
   });
   dialog.addEventListener('click', event => {
     const button = event.target.closest('button'); if (!button || button.disabled) return;
-    const {connect:connectPlatform,disconnect,setup,saveSettings,finish,uploader,copy,mark,markFinish,markCancel,verifyFacebook,verifyInstagram,instagramPage,resetPlatform,resetField,direct,checkAccount} = button.dataset;
+    const {connect:connectPlatform,disconnect,setup,saveSettings,finish,uploader,copy,mark,markFinish,markCancel,verifyFacebook,verifyInstagram,verifyYoutube,instagramPage,resetPlatform,resetField,direct,checkAccount} = button.dataset;
     if (resetPlatform) {
       if (resetField) { delete view.overrides[resetPlatform]?.[resetField]; if (!Object.keys(view.overrides[resetPlatform] || {}).length) delete view.overrides[resetPlatform]; }
       else delete view.overrides[resetPlatform];
       draftChanged();
     }
-    else if (direct) { $('publish-platform').value = direct; optionsChanged(); $('publish-submit-area').scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',block:'nearest'}); $('publish-reviewed').focus(); }
+    else if (direct) { $('publish-platform').value = direct; optionsChanged(); reviewedReset(); $('publish-submit-area').scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',block:'nearest'}); $('publish-reviewed').focus(); if (button.dataset.retryUpload) feedback('Review the video and destination, then publish to retry the upload.'); }
     else if (checkAccount) action(async()=> {
       const result = await view.api('/api/publishing/check-account',{platform:checkAccount});
       await refresh(); reviewedReset(); feedback(result.message,!result.ok);
@@ -361,6 +425,10 @@
     else if (instagramPage) action(async()=> {
       const result = await view.api('/api/publishing/instagram-page',{});
       await refresh(); reviewedReset(); feedback(result.message);
+    });
+    else if (verifyYoutube) action(async()=> {
+      const result = await view.api('/api/publishing/verify-youtube',{id:view.project.id,job_id:verifyYoutube,url:button.closest('[data-platform-job]').querySelector('[data-existing-youtube-url]').value.trim()});
+      await refresh(); feedback(result.message); reviewedReset();
     });
     else if (verifyInstagram) action(async()=> {
       const result = await view.api('/api/publishing/verify-instagram',{id:view.project.id,job_id:verifyInstagram});
@@ -403,11 +471,17 @@
   window.VideoTurboPublishing = {
     configure({api,toast,mediaUrl}) { view.api = api; view.toast = toast || (()=>{}); view.mediaUrl = mediaUrl; lock(); },
     update(project) {
-      if (view.project?.id !== project?.id) { view.data = null; view.loadedId = ''; view.dirty = false; view.pending = {}; view.overrides = {}; if (dialog.open) dialog.close(); }
+      if (view.project?.id !== project?.id) { view.data = null; view.loadedId = ''; view.dirty = false; view.pending = {}; view.overrides = {}; for (const input of dialog.querySelectorAll('[data-batch-platform]')) input.checked = false; if (dialog.open) dialog.close(); }
       view.project = project; updateVideo(); lock();
     },
     lock,
     open,
+    async openSetup(platform) {
+      await open(); $('publish-setup').open = true;
+      const setup = $('publish-' + platform + '-setup');
+      setup.scrollIntoView({block:'nearest',behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'});
+      setup.querySelector('input')?.focus({preventScroll:true});
+    },
   };
   optionsChanged(); lock();
 })();

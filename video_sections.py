@@ -3,7 +3,7 @@ from pathlib import Path
 import math
 from pipeline_common import normalize_text
 
-LAYOUTS = {'background', 'single', 'split', 'title'}
+LAYOUTS = {'background', 'single', 'split', 'title', 'cyber_breach', 'thermal_meltdown', 'zero_ransom'}
 VIDEO_EXTS = {'.mp4', '.mov', '.mkv', '.webm'}
 IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp'}
 BACKGROUND_NAMES = {'gta_background.mp4', 'roblox.mp4', 'fortnite.mp4'}

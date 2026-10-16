@@ -321,6 +321,7 @@ class TransportTests(unittest.TestCase):
 
 class PublisherTests(unittest.TestCase):
     def setUp(self):
+        delay = patch.object(pub, 'META_RETRY_DELAY', 0); delay.start(); self.addCleanup(delay.stop)
         temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.project = self.root / 'project'; (self.project / 'output').mkdir(parents=True)
@@ -345,7 +346,8 @@ class PublisherTests(unittest.TestCase):
         self.app.start('project', 'facebook_page', self.draft, True, self.signature); self.wait()
 
     def failed_upload(self):
-        self.app.session = StreamingSession(Response(payload=START), Response(payload={'success': True}), requests.Timeout('lost'))
+        self.app.session = StreamingSession(Response(payload=START), Response(payload={'success': True}), requests.Timeout('lost'),
+            *[requests.ConnectionError('status unavailable') for _ in range(pub.META_RECOVERY_CHECKS)])
         self.start()
         return self.app.job['id']
 
@@ -375,7 +377,7 @@ class PublisherTests(unittest.TestCase):
 
     def test_transfer_failure_reason_survives_restart_without_exposing_exception(self):
         failure = requests.ConnectionError(ProtocolError(TOKEN, ConnectionResetError(10054, TOKEN)))
-        self.app.session = StreamingSession(Response(payload=START), failure)
+        self.app.session = StreamingSession(*[reply for _ in range(pub.META_UPLOAD_ATTEMPTS) for reply in (Response(payload=START), failure)])
         self.start()
         snapshot = self.app.snapshot('project')
         self.assertEqual(snapshot['job']['network_reason'], 'connection_reset')
@@ -384,7 +386,8 @@ class PublisherTests(unittest.TestCase):
         restarted = pub.Publisher(self.root / 'data', lambda key:self.project, session=Session())
         self.assertEqual(restarted.snapshot('project')['history'][0]['network_reason'], 'connection_reset')
         self.assertNotIn(TOKEN, json.dumps(snapshot))
-        self.assertEqual(len(self.app.session.calls), 2)
+        self.assertEqual(snapshot['job']['retry_count'], 2)
+        self.assertEqual(len(self.app.session.calls), 6)
 
     def test_meta_upload_error_details_are_actionable_and_redacted_in_history(self):
         message = 'Video was rejected. ' + TOKEN + ' EAATESTSECRETAAAA1234 https://private.invalid/?access_token=' + TOKEN
@@ -634,7 +637,7 @@ class PublisherTests(unittest.TestCase):
         self.assertFalse(self.app.session.calls)
 
     def test_failed_upload_without_finish_can_retry_and_expired_page_never_refreshes_instagram(self):
-        self.app.session = StreamingSession(Response(payload=START), requests.Timeout('lost binary'))
+        self.app.session = StreamingSession(*[reply for _ in range(pub.META_UPLOAD_ATTEMPTS) for reply in (Response(payload=START), requests.Timeout('lost binary'))])
         self.start(); self.assertFalse(self.app.job['publish_attempted'])
         self.app.session = replies(COMPLETE); self.start(); self.assertEqual(self.app.job['status'], 'complete')
         self.app.vault['accounts']['facebook_page']['expires_at'] = 1; self.app.session = Session()

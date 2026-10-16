@@ -32,6 +32,14 @@ HELP = {
 }
 SCOPES = {'youtube': 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly',
           'instagram': 'instagram_business_basic,instagram_business_content_publish'}
+META_UPLOAD_ATTEMPTS = 3
+META_RECOVERY_CHECKS = 3
+META_RETRY_DELAY = 1
+
+
+def _retryable_network(error):
+    return (getattr(error, 'network_kind', None) in ('timeout', 'connection')
+            and getattr(error, 'network_reason', None) not in ('tls', 'tls_certificate'))
 
 
 def _protect(payload, decrypt=False):
@@ -60,6 +68,7 @@ class Publisher:
         self.data = Path(data) / 'publishing'
         self.project_resolver = project_resolver
         self.session = session or requests.Session()
+        self.worker_sessions = session is None
         self.lock = threading.RLock()
         self.pending = {}
         self.vault = {'settings': {}, 'accounts': {}}
@@ -71,20 +80,43 @@ class Publisher:
                                                decrypt=envelope.get('protection') == 'windows-dpapi'))
             except (OSError, ValueError, KeyError):
                 raise ValueError('Publishing credentials could not be opened. Use the Windows user that connected the accounts.') from None
-        self.job = read_cache(self.data / 'job.json') or None
-        if self.job and self.job.get('status') == 'running':
-            self.job.update(status='interrupted', stage='Upload interrupted', finished=time.time(),
-                            error='Studio restarted during an upload. Check your account before trying again.')
+        saved = read_cache(self.data / 'job.json') or None
+        self.jobs = {}
+        if saved and 'jobs' in saved:
+            self.jobs = {job.get('platform', ''): job for job in saved['jobs']}
+            self.job = {key: value for key, value in saved.items() if key != 'jobs'} or None
+            if self.job:
+                self.job = self.jobs.get(self.job.get('platform'), self.job)
+        else:
+            self.job = saved
+        for job in self._jobs():
+            if job.get('status') == 'running':
+                job.update(status='interrupted', stage='Upload interrupted', finished=time.time(),
+                           error='Studio restarted during an upload. Check your account before trying again.')
+                self._history_status(job)
+        if saved:
             self._persist_job()
-            self._history_status(self.job)
+
+    def _jobs(self):
+        jobs = dict(self.jobs)
+        if self.job:
+            jobs[self.job.get('platform', '')] = self.job
+        return list(jobs.values())
+
+    def _find_job(self, job_id):
+        return next((job for job in self._jobs() if job.get('id') == job_id), None)
 
     @property
     def running(self):
-        return bool(self.job and self.job.get('status') == 'running')
+        with self.lock:
+            return any(job.get('status') == 'running' for job in self._jobs())
 
-    def _idle(self):
-        if self.running:
-            raise ValueError('Wait for the current publishing upload to finish.')
+    def _idle(self, platform=None):
+        if any(job.get('status') == 'running' and
+               (platform is None or not job.get('platform') or job['platform'] == platform)
+               for job in self._jobs()):
+            raise ValueError('Wait for the current publishing upload to finish.' if platform is None
+                             else 'An upload to this platform is already running.')
 
     def _vault_save(self):
         payload = json.dumps(self.vault, ensure_ascii=False).encode('utf-8')
@@ -105,7 +137,7 @@ class Publisher:
         write_json(self._record_path(identifier), record)
 
     def _persist_job(self):
-        write_json(self.data / 'job.json', self.job)
+        write_json(self.data / 'job.json', {**(self.job or {}), 'jobs': self._jobs()})
 
     def _history_status(self, job):
         record = self._record(job['project'])
@@ -115,6 +147,8 @@ class Publisher:
                          error=job.get('error', ''), remote_id=job.get('remote_id', ''), warning=job.get('warning', ''),
                          container_id=job.get('container_id', ''), processing_status=job.get('processing_status', ''),
                          network_reason=job.get('network_reason', ''),
+                         retry_count=job.get('retry_count', 0), verified=job.get('verified', False),
+                         confirmed_unpublished=job.get('confirmed_unpublished', False),
                          publish_attempted=job.get('publish_attempted', False))
             self._save_record(job['project'], record)
 
@@ -203,14 +237,17 @@ class Publisher:
 
     def active_job(self):
         with self.lock:
-            return copy.deepcopy(self.job)
+            jobs = self._jobs()
+            job = next((job for job in jobs if job.get('status') == 'running'), self.job)
+            return {**copy.deepcopy(job), 'jobs': copy.deepcopy(jobs)} if job else None
 
     def snapshot(self, identifier):
         with self.lock:
             record = self._record(identifier)
             return {'draft': record.get('draft') or self._default_draft(identifier),
                     'accounts': self._accounts(), 'video': self._video(identifier)[1],
-                    'history': copy.deepcopy(record.get('history', [])), 'job': copy.deepcopy(self.job)}
+                    'history': copy.deepcopy(record.get('history', [])), 'job': copy.deepcopy(self.job),
+                    'jobs': copy.deepcopy(self._jobs())}
 
     def save_draft(self, identifier, draft):
         with self.lock:
@@ -510,65 +547,88 @@ class Publisher:
         return account
 
     def start(self, identifier, platform, draft, reviewed=False, video_signature=''):
+        result = self.start_many(identifier, [platform], draft, reviewed, video_signature)
+        return {'job': result['jobs'][0]}
+
+    def start_many(self, identifier, platforms, draft, reviewed=False, video_signature=''):
         with self.lock:
-            self._idle()
-            if platform not in DIRECT: raise ValueError('Use the assisted upload buttons for TikTok and Facebook profiles.')
-            if reviewed is not True: raise ValueError('Review the final video and posting settings before publishing.')
-            path, video = self._video(identifier)
-            if not video['ready']: raise ValueError('Build the video before publishing.')
-            if video_signature != video['signature']: raise ValueError('The finished video changed. Reload the publishing screen and review it again.')
-            draft = self._draft(identifier, draft)
-            if not self._accounts()[platform]['connected']: raise ValueError('Connect your ' + platform.capitalize() + ' account first.')
-            post = self._platform_draft(draft, platform)
-            caption = '\n\n'.join(x for x in (post['description'], post['hashtags']) if x)
-            if platform == 'youtube':
-                if not post['title'] or '<' in post['title'] or '>' in post['title']: raise ValueError('YouTube needs a title without angle brackets.')
-                if len(caption) > 5000: raise ValueError('YouTube description and hashtags must fit within 5,000 characters.')
-            elif platform == 'instagram':
-                if self.vault['accounts'][platform].get('connection_type') != 'facebook':
-                    post['instagram_video_url'] = public_video_url(draft['instagram_video_url'])
-                if len(caption) > 2200: raise ValueError('Instagram caption and hashtags must fit within 2,200 characters.')
-            destination_id = ''
-            destination_name = ''
-            if platform == 'facebook_page':
-                account = self.vault['accounts'][platform]
-                destination_id = facebook_id(account.get('page_id'))
-                destination_name = account['name']
-                if draft['facebook_page_id'] != destination_id:
-                    raise ValueError('The Facebook Page changed. Reload the publishing screen and review the destination again.')
-            if platform == 'instagram':
-                account = self.vault['accounts'][platform]
-                destination_id = _instagram_id(account.get('user_id'), 'account ID')
-                destination_name = account['name']
+            if (not isinstance(platforms, list) or not platforms or
+                    any(not isinstance(platform, str) or platform not in DIRECT for platform in platforms)):
+                raise ValueError('Choose YouTube, Instagram or Facebook Page for direct publishing.')
+            if len(platforms) != len(set(platforms)):
+                raise ValueError('Select each publishing platform only once.')
+            prepared = [self._prepare_start(identifier, platform, draft, reviewed, video_signature)
+                        for platform in platforms]
             record = self._record(identifier)
-            matching = [row for row in record['history'] if row.get('platform') == platform
-                        and row.get('video_signature') == video_signature
-                        and (platform != 'facebook_page' or row.get('destination_id') == destination_id)
-                        and (platform != 'instagram' or not row.get('destination_id') or row.get('destination_id') == destination_id)]
-            if platform == 'facebook_page' and any(row.get('status') in ('failed', 'interrupted')
-                    and row.get('publish_attempted') and not row.get('confirmed_unpublished') for row in matching):
-                raise ValueError('A Facebook publish may already have succeeded. Check the existing upload before starting another.')
-            if platform == 'instagram' and any(row.get('status') in ('failed', 'interrupted')
-                    and (row.get('publish_attempted') or row.get('processing_status') == 'PUBLISHED')
-                    and not row.get('confirmed_unpublished') for row in matching):
-                raise ValueError('An Instagram publish may already have succeeded. Check the existing upload before starting another.')
-            if any(row.get('status') in ('complete', 'manual') for row in matching):
-                raise ValueError('This video is already recorded as uploaded to ' + platform.capitalize() + '. Check its history before posting again.')
-            record['draft'] = draft
-            job = {'id': uuid.uuid4().hex, 'project': identifier, 'platform': platform, 'status': 'running',
-                'stage': 'Connecting to account', 'progress': 0, 'started': time.time(), 'error': '', 'url': '',
-                'destination_id':destination_id, 'destination_name':destination_name,
-                'instagram_connection_type':self.vault['accounts'][platform].get('connection_type', 'instagram_login') if platform == 'instagram' else ''}
-            record['history'].append({'id': job['id'], 'platform': platform, 'status': 'running', 'url': '',
-                'title': post['title'], 'created': job['started'], 'video_signature': video_signature,
-                'visibility': draft['youtube_privacy'] if platform == 'youtube' else 'account', 'method': 'api',
-                'destination_id':destination_id, 'destination_name':destination_name,
-                'instagram_connection_type':job['instagram_connection_type']})
+            record['draft'] = prepared[0][4]
+            record['history'].extend(item[3] for item in prepared)
             self._save_record(identifier, record)
-            self.job = job
+            for job, path, post, entry, normalized in prepared:
+                self.jobs[job['platform']] = job
+                self.job = job
             self._persist_job()
-            threading.Thread(target=self._run, args=(job, path, copy.deepcopy(post)), daemon=True).start()
-            return {'job': copy.deepcopy(job)}
+            result = {'jobs': copy.deepcopy([item[0] for item in prepared])}
+            for job, path, post, entry, normalized in prepared:
+                threading.Thread(target=self._run, args=(job, path, copy.deepcopy(post)), daemon=True).start()
+            return result
+
+    def _prepare_start(self, identifier, platform, draft, reviewed, video_signature):
+        self._idle(platform)
+        if platform not in DIRECT: raise ValueError('Use the assisted upload buttons for TikTok and Facebook profiles.')
+        if reviewed is not True: raise ValueError('Review the final video and posting settings before publishing.')
+        path, video = self._video(identifier)
+        if not video['ready']: raise ValueError('Build the video before publishing.')
+        if video_signature != video['signature']: raise ValueError('The finished video changed. Reload the publishing screen and review it again.')
+        draft = self._draft(identifier, draft)
+        if not self._accounts()[platform]['connected']: raise ValueError('Connect your ' + platform.capitalize() + ' account first.')
+        post = self._platform_draft(draft, platform)
+        caption = '\n\n'.join(x for x in (post['description'], post['hashtags']) if x)
+        if platform == 'youtube':
+            if not post['title'] or '<' in post['title'] or '>' in post['title']: raise ValueError('YouTube needs a title without angle brackets.')
+            if len(caption) > 5000: raise ValueError('YouTube description and hashtags must fit within 5,000 characters.')
+        elif platform == 'instagram':
+            if self.vault['accounts'][platform].get('connection_type') != 'facebook':
+                post['instagram_video_url'] = public_video_url(draft['instagram_video_url'])
+            if len(caption) > 2200: raise ValueError('Instagram caption and hashtags must fit within 2,200 characters.')
+        destination_id = ''
+        destination_name = ''
+        if platform == 'facebook_page':
+            account = self.vault['accounts'][platform]
+            destination_id = facebook_id(account.get('page_id'))
+            destination_name = account['name']
+            if draft['facebook_page_id'] != destination_id:
+                raise ValueError('The Facebook Page changed. Reload the publishing screen and review the destination again.')
+        if platform == 'instagram':
+            account = self.vault['accounts'][platform]
+            destination_id = _instagram_id(account.get('user_id'), 'account ID')
+            destination_name = account['name']
+        record = self._record(identifier)
+        matching = [row for row in record['history'] if row.get('platform') == platform
+                    and row.get('video_signature') == video_signature
+                    and (platform != 'facebook_page' or row.get('destination_id') == destination_id)
+                    and (platform != 'instagram' or not row.get('destination_id') or row.get('destination_id') == destination_id)]
+        if any(row.get('status') == 'running' for row in matching):
+            raise ValueError('An upload to this platform is already running.')
+        if platform == 'facebook_page' and any(row.get('status') in ('failed', 'interrupted')
+                and row.get('publish_attempted') and not row.get('confirmed_unpublished') for row in matching):
+            raise ValueError('A Facebook publish may already have succeeded. Check the existing upload before starting another.')
+        if platform == 'instagram' and any(row.get('status') in ('failed', 'interrupted')
+                and (row.get('publish_attempted') or row.get('processing_status') == 'PUBLISHED')
+                and not row.get('confirmed_unpublished') for row in matching):
+            raise ValueError('An Instagram publish may already have succeeded. Check the existing upload before starting another.')
+        if any(row.get('status') in ('complete', 'manual') for row in matching):
+            raise ValueError('This video is already recorded as uploaded to ' + platform.capitalize() + '. Check its history before posting again.')
+        job = {'id': uuid.uuid4().hex, 'project': identifier, 'platform': platform, 'status': 'running',
+            'video_signature': video_signature,
+            'stage': 'Connecting to account', 'progress': 0, 'started': time.time(), 'error': '', 'url': '',
+            'destination_id':destination_id, 'destination_name':destination_name,
+            'instagram_connection_type':self.vault['accounts'][platform].get('connection_type', 'instagram_login') if platform == 'instagram' else ''}
+        entry = {'id': job['id'], 'platform': platform, 'status': 'running', 'url': '',
+            'title': post['title'], 'created': job['started'], 'video_signature': video_signature,
+            'visibility': draft['youtube_privacy'] if platform == 'youtube' else 'account', 'method': 'api',
+            'destination_id':destination_id, 'destination_name':destination_name,
+            'instagram_connection_type':job['instagram_connection_type']}
+        return job, path, post, entry, draft
 
     def _progress(self, job, percent, stage):
         with self.lock:
@@ -598,24 +658,100 @@ class Publisher:
         message = re.sub(r'https?://\S+', '[provider URL]', message)
         return message[:600]
 
+    def _read_meta_status(self, operation):
+        for attempt in range(META_UPLOAD_ATTEMPTS):
+            try:
+                return operation()
+            except ValueError as error:
+                if not _retryable_network(error) or attempt + 1 == META_UPLOAD_ATTEMPTS:
+                    raise
+                time.sleep(META_RETRY_DELAY * 2 ** attempt)
+
+    def _recover_meta_publication(self, job, session, account, error):
+        """Resolve a lost publish reply using reads of the saved upload only."""
+        for attempt in range(META_RECOVERY_CHECKS):
+            self._progress(job, job['progress'], 'Connection interrupted. Checking existing upload ('
+                           + str(attempt + 1) + ' of ' + str(META_RECOVERY_CHECKS) + ')')
+            if attempt:
+                time.sleep(META_RETRY_DELAY * 2 ** (attempt - 1))
+            try:
+                if job['platform'] == 'facebook_page':
+                    remote_id = job.get('remote_id') or getattr(error, 'remote_id', '')
+                    result = facebook_status(session, account, remote_id, owner=True)
+                    owner = result.get('from')
+                    if (str(result.get('id')) != remote_id or not isinstance(owner, dict)
+                            or str(owner.get('id')) != account['page_id']):
+                        return None
+                    state = facebook_publication_state(result)
+                    if state == 'published':
+                        return {'remote_id': remote_id, 'url': facebook_permalink(result.get('permalink_url'), remote_id),
+                                'verified': True, 'warning': 'Connection recovered. Meta confirmed the existing Reel is published.'}
+                    failed = state == 'failed'
+                else:
+                    container_id = job.get('container_id') or getattr(error, 'container_id', '')
+                    state = instagram_container_status(session, account, container_id)
+                    job['processing_status'] = state
+                    if state == 'PUBLISHED':
+                        return {'verified': True, 'warning': 'Connection recovered. Instagram confirmed publication; check your profile for the Reel link.'}
+                    failed = state in ('ERROR', 'EXPIRED')
+                if failed:
+                    job['confirmed_unpublished'] = True
+                    return None
+            except ValueError as check_error:
+                if getattr(check_error, 'provider_code', None) == 190:
+                    raise
+                if not _retryable_network(check_error):
+                    return None
+        return None
+
+    def _publish_meta(self, job, session, account, path, draft):
+        facebook = job['platform'] == 'facebook_page'
+        adapter = facebook_publish if facebook else instagram_local_publish
+        checkpoint = self._checkpoint if facebook else self._instagram_checkpoint
+        for attempt in range(META_UPLOAD_ATTEMPTS):
+            if attempt:
+                self._progress(job, job['progress'], 'Connection interrupted. Retrying upload ('
+                               + str(attempt + 1) + ' of ' + str(META_UPLOAD_ATTEMPTS) + ')')
+                time.sleep(META_RETRY_DELAY * 2 ** (attempt - 1))
+                with self.lock:
+                    _, video = self._video(job['project'])
+                    if not video['ready'] or video['signature'] != job['video_signature']:
+                        raise ValueError('The finished video changed. Review it again before retrying the upload.')
+                    job.update(progress=0, retry_count=attempt)
+            prefix = 'Retry ' + str(attempt) + ' of ' + str(META_UPLOAD_ATTEMPTS - 1) + ': ' if attempt else ''
+            try:
+                return adapter(session, account, path, draft,
+                    lambda percent, stage: self._progress(job, percent, prefix + stage),
+                    checkpoint_callback=lambda **fields: checkpoint(job, **fields))
+            except ValueError as error:
+                if not _retryable_network(error):
+                    raise
+                if getattr(error, 'publish_attempted', job.get('publish_attempted', False)):
+                    recovered = self._recover_meta_publication(job, session, account, error)
+                    if recovered:
+                        return recovered
+                    raise
+                if attempt + 1 == META_UPLOAD_ATTEMPTS:
+                    raise
+
     def _run(self, job, path, draft):
+        own_session = self.worker_sessions and isinstance(self.session, requests.sessions.Session)
+        session = requests.Session() if own_session else self.session
         try:
             with self.lock: account = self._access_account(job['platform'])
             progress = lambda n, stage: self._progress(job, n, stage)
-            if job['platform'] == 'facebook_page':
-                result = facebook_publish(self.session, account, path, draft, progress,
-                    checkpoint_callback=lambda **fields:self._checkpoint(job, **fields))
-            elif job['platform'] == 'instagram' and account.get('connection_type') == 'facebook':
-                result = instagram_local_publish(self.session, account, path, draft, progress,
-                    checkpoint_callback=lambda **fields:self._instagram_checkpoint(job, **fields))
+            local_meta = job['platform'] == 'facebook_page' or job['platform'] == 'instagram' and account.get('connection_type') == 'facebook'
+            if local_meta:
+                result = self._publish_meta(job, session, account, path, draft)
             else:
                 adapter = youtube_upload if job['platform'] == 'youtube' else instagram_publish
-                result = adapter(self.session, account, path, draft, progress)
-            if not isinstance(result, dict) or not result.get('remote_id'):
+                result = adapter(session, account, path, draft, progress)
+            if not isinstance(result, dict) or not (result.get('remote_id') or local_meta and job['platform'] == 'instagram' and result.get('verified') is True):
                 raise ValueError('The platform did not confirm the upload. Check your account before trying again.')
             with self.lock:
                 job.update(status='complete', stage='Uploaded' if job['platform'] == 'youtube' else 'Published',
-                           progress=100, url=result.get('url', ''), remote_id=result['remote_id'],
+                           progress=100, url=result.get('url', ''), remote_id=result.get('remote_id', ''),
+                           verified=result.get('verified', False),
                            warning=result.get('warning', ''), finished=time.time())
         except Exception as error:
             with self.lock:
@@ -644,6 +780,9 @@ class Publisher:
                 self._persist_job()
                 self._history_status(job)
 
+            if own_session:
+                session.close()
+
     def verify_instagram(self, identifier, job_id):
         """Read a saved local-upload container; never publish or upload again."""
         with self.lock:
@@ -655,7 +794,7 @@ class Publisher:
             account = self._access_account('instagram')
             if account.get('connection_type') != 'facebook' or account.get('user_id') != entry.get('destination_id'):
                 raise ValueError('Reconnect the Instagram account used for this upload before checking it.')
-            status = instagram_container_status(self.session, account, entry['container_id'])
+            status = self._read_meta_status(lambda: instagram_container_status(self.session, account, entry['container_id']))
             entry['processing_status'] = status
             entry['checked_at'] = time.time()
             if status == 'PUBLISHED':
@@ -668,12 +807,13 @@ class Publisher:
             else:
                 message = 'Instagram has processed this upload; publication is still unconfirmed. Check again before retrying.' if status == 'FINISHED' else 'Instagram is still uploading or processing this video. Check again shortly.'
             self._save_record(identifier, record)
-            if self.job and self.job.get('id') == job_id:
-                self.job.update(processing_status=status)
+            job = self._find_job(job_id)
+            if job:
+                job.update(processing_status=status)
                 if status == 'PUBLISHED':
-                    self.job.update(status='complete', stage='Published', progress=100, error='', finished=entry['finished'], warning=entry['warning'])
+                    job.update(status='complete', stage='Published', progress=100, error='', finished=entry['finished'], warning=entry['warning'])
                 elif status in ('ERROR', 'EXPIRED'):
-                    self.job['confirmed_unpublished'] = True
+                    job['confirmed_unpublished'] = True
                 self._persist_job()
             return {'ok':True, 'message':message}
 
@@ -734,8 +874,9 @@ class Publisher:
                          'error': '', 'warning': 'Confirmed by checking the existing YouTube video.', 'verified': True}
             entry.update(recovered)
             self._save_record(identifier, record)
-            if self.job and self.job['id'] == job_id:
-                self.job.update(recovered, stage='Uploaded', progress=100)
+            job = self._find_job(job_id)
+            if job:
+                job.update(recovered, stage='Uploaded', progress=100)
                 self._persist_job()
             return {'ok': True, 'url': link, 'message': 'Existing upload verified. History updated without uploading another copy.'}
 
@@ -750,7 +891,7 @@ class Publisher:
             account = self._access_account('facebook_page')
             if account['page_id'] != entry.get('destination_id'):
                 raise ValueError('Reconnect the Facebook Page used for this upload before checking it.')
-            result = facebook_status(self.session, account, entry['remote_id'], owner=True)
+            result = self._read_meta_status(lambda: facebook_status(self.session, account, entry['remote_id'], owner=True))
             owner = result.get('from')
             if str(result.get('id')) != entry['remote_id'] or not isinstance(owner, dict) or str(owner.get('id')) != account['page_id']:
                 raise ValueError('Facebook did not confirm that this video belongs to the connected Page.')
@@ -760,8 +901,9 @@ class Publisher:
                     'error':'', 'warning':'Confirmed by checking the existing Facebook Reel.', 'verified':True}
                 entry.update(recovered)
                 self._save_record(identifier, record)
-                if self.job and self.job['id'] == job_id:
-                    self.job.update(recovered, stage='Published', progress=100)
+                job = self._find_job(job_id)
+                if job:
+                    job.update(recovered, stage='Published', progress=100)
                     self._persist_job()
                 return {'ok':True, 'message':'Existing Facebook Reel verified. No duplicate was uploaded.'}
             if state == 'failed':
