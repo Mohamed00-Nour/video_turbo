@@ -38,10 +38,11 @@
   const changed=Boolean(generated && (p.voice_settings.stale || state.dirty));
   $('voice-audio-status').textContent=current?(changed?'The script or voice settings changed. Generate the current voiceover before building.':`Saved voiceover: ${generated.voice_name} / ${generated.model_name}, ${Number(generated.duration).toFixed(1)} seconds.`):'Generate your voiceover, then listen to it in the audio player below.';
   $('voice-regenerate').hidden=!current;
-  $('voice-build').textContent=ref && Object.keys(ref).length?'Generate voiceover, analyze & build':'Generate voiceover & build';
+  $('voice-build').textContent=ref?.workflow==='flow'?'Generate voiceover & plan Flow scenes':ref && Object.keys(ref).length?'Generate voiceover, analyze & build':'Generate voiceover & build';
   $('voice-connection-status').textContent=loading?'Loading ElevenLabs voices and models...':!settings?.configured?'Connect your ElevenLabs account in Voice settings first.':catalog?catalog.voices.length+' voices and '+catalog.models.length+' speech models loaded.':'API key saved. Refresh to load your voices and models.';
   const upload=$('reference-voice-source').value==='upload';
   $('reference-voice-upload').hidden=!upload;$('reference-voice').required=upload;
+  window.VideoTurboFlow?.syncCreation();
  }
  function lock(blocked){
   if(!app)return;

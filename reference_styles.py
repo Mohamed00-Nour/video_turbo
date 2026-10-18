@@ -417,7 +417,7 @@ def describe_assets(project, inventory):
 def plan_input_signature(project, script, reference, voice, state, provider, model):
     uploads=[file_signature(p) for p in sorted((project/'media').rglob('*'))
              if p.is_file() and p.suffix.lower() in IMAGE_EXTS|VIDEO_EXTS
-             and not p.is_relative_to(project/'media/reference')]
+             and not p.is_relative_to(project/'media/reference') and not p.is_relative_to(project/'media/flow')]
     return fingerprint({'script':script,'reference':file_signature(reference),'voice':file_signature(voice),
                         'instructions':state.get('instructions',''),'provider':provider,'model':model,'uploads':uploads})
 
@@ -439,6 +439,9 @@ def finish_preparation(project, plan, state):
 
 
 def run_project(project, data):
+    if read_cache(Path(project) / 'reference_style.json').get('workflow') == 'flow':
+        from flow_workflow import run_project as run_flow
+        return run_flow(project, data)
     import build_video as builder
     project=Path(project).resolve();state_path=project/'reference_style.json';state=read_cache(state_path)
     try:

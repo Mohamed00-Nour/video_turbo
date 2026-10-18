@@ -683,7 +683,52 @@ Analytics tests use simulated provider responses and temporary storage:
 python -m unittest -v test_analytics.py
 ```
 
+## Google Flow with your Google AI subscription
+
+In **Create from Reference**, choose **Google Flow — use my subscription**.
+This is an assisted handoff: Video Turbo does not sign into Google, automate
+Flow, or call a Google generation API. Generate your images and videos in Flow
+using the allowance shown in your own Google account.
+
+1. Start with your exact spoken script, or choose **Develop my idea into a script**.
+   Add a reference up to three minutes long, optional subject images, and style
+   priorities. Select your local Codex or Antigravity analysis provider and model.
+2. For an idea, click **Analyze reference & draft script**, edit the draft, and
+   click **Approve & use this script**. No speech is generated before approval.
+3. Upload your recording or select an ElevenLabs voice, then click
+   **Prepare Flow storyboard**. The storyboard follows the actual recording
+   and includes shared visual direction, image prompts, motion prompts, and lengths.
+4. Use **Open Google Flow**, create each scene image, and animate it with
+   **Frames to Video**. Reuse subject references for continuity. Choose vertical
+   9:16 and at least the suggested generation length. Review and download your
+   chosen takes. **Download production pack** saves all prompts as Markdown.
+5. Import each take into its matching scene, preview it, and adjust the trim
+   point. Clips must contain playable video long enough to cover the scene.
+   A failed import leaves the previous take intact.
+6. Click **Build final video** after every scene has a clip. The renderer adds
+   narration, captions and optional background music. Flow audio is muted;
+   shots fill the vertical frame with cuts or brief fades through black.
+   Landscape clips are cropped. Short generated clips are never looped.
+
+Changing the script, recording or reference requires a fresh storyboard.
+Repeating preparation with unchanged inputs reuses the storyboard and clips.
+Copied prompts are self-contained: local analysis files and narration are omitted,
+and motion cues use clip-relative time. Existing storyboards receive these export
+fixes when reopened; a new analysis request is not required.
+Generated clips do not invalidate analysis. Old takes remain in the media
+library; previous storyboard/assignment pairs are kept in
+`reference/flow-history/`. The current storyboard is in `reference/flow-plan.json`.
+Existing Video Turbo animation projects keep their normal workflow.
+
+Verify without generating paid media:
+
+```powershell
+python -m unittest -v test_flow_workflow test_reference_styles test_video_studio test_voice_generation
+```
+
 ## Reference Styles with local Antigravity or Codex
+
+For built-in animation, select **Video Turbo animation** under **Video creation**.
 
 Choose **Create from Reference** in the sidebar, then select **AI provider** and
 its model in the creation dialog. Both Codex / ChatGPT and Antigravity / Gemini
@@ -821,3 +866,36 @@ inside the heading instead of repeating that phrase below it. New scene entrance
 adapt to scene duration, keep headline text sharp, and preserve the full aligned
 voiceover. Word captions use each scene's background contrast. Existing version 1
 plans retain their original renderer until you analyze again.
+
+
+### Flow finishing follows each reference
+
+Each new Flow storyboard analyses its own reference and stores a finishing profile
+in `flow_style.finishing`. This controls headline font family and movement,
+heading placement and color, optional grids/overlays, depth motifs and strength,
+transitions, caption presentation and sound accents. Captions remain independent
+of the editorial display copy in each scene's `flow_text` object.
+
+Serif display rendering uses a local/installed Bodoni font when available and
+the bundled Amiri face otherwise; no proprietary font file is required in Git.
+
+The lavender serif headlines, blur/slide entrances and large corner asterisks are
+specific to the supplied reference for `first flow`. They are explicitly saved
+on that project. They are never the fallback for a different reference. Without
+an analysed finishing profile, decorative headings, depth shapes and sound cues
+stay off. A reference can choose sans or mono type, simpler fades, arrows, orbits,
+plain captions or cuts instead. Changed references discard prior-reference
+finishing and headline overrides; reimporting clips for the same reference keeps
+user edits.
+
+Scene boundaries, recording length, clip trim points and word timestamps stay
+fixed. An outgoing scene holds its last frame during any overlap, requiring no
+extra clip footage. Set `"flow_finish": false` in project config to disable the
+finishing pass. The Studio preview includes narration and selected sound cues;
+the normal build mixes these with optional music before loudness normalization.
+
+```powershell
+python build_video.py --project "projects/first flow-e01081" --preview-only --preview-at 1.8
+python -m unittest test_flow_finishing test_flow_workflow test_audio_finalization
+node code/tests/flow-finish.cjs
+```

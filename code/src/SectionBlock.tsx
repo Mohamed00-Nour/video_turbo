@@ -1,5 +1,5 @@
 import React from 'react';
-import { Img, interpolate, staticFile, useCurrentFrame } from 'remotion';
+import { Img, OffthreadVideo, interpolate, staticFile, useCurrentFrame, useVideoConfig } from 'remotion';
 import { LoopingVideo } from './LoopingVideo';
 import { FlashTransition } from './FlashTransition';
 import { CyberBreachScene } from './CyberBreachScene';
@@ -10,6 +10,16 @@ import { ReferenceStyleScene } from './ReferenceStyleScene';
 type Media = { src: string; kind: string; durationFrames?: number };
 export const SectionBlock: React.FC<{ block: any; blur: number }> = ({ block, blur }) => {
   const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+
+  if (block.layout === 'flow_clip') {
+    const fade = Math.max(1, Math.min(Math.round(.15 * fps), Math.floor(block.durationFrames / 3)));
+    return <div style={{width: '100%', height: '100%', background: '#000'}}>
+      <OffthreadVideo src={staticFile(block.media.src)} muted startFrom={Math.round((block.offset_seconds ?? 0) * fps)}
+        style={{width: '100%', height: '100%', objectFit: block.fit ?? 'cover',
+          opacity: Math.min(1, block.fade_in ? frame / fade : 1, block.fade_out ? (block.durationFrames - 1 - frame) / fade : 1)}} />
+    </div>;
+  }
 
   if (block.layout === 'reference_style') return <ReferenceStyleScene block={block}/>;
 

@@ -2,6 +2,7 @@ import React from "react";
 import timelineData from "./timeline.json";
 import {scenePalette} from "./reference/visualStyle";
 import {CaptionWords, textDirection} from "./captionText";
+import {FlowCaption} from "./flow/FlowCaption";
 
 interface WordData {
   word: string;
@@ -53,6 +54,25 @@ export const Caption: React.FC<CaptionProps> = ({ currentFrame, timeline=timelin
   }
 
   if (!activeWord) return null;
+
+  if (currentBlock.layout === 'flow_clip' && currentBlock.flowFinish !== false) {
+    return <FlowCaption words={words} activeWord={activeWord} block={currentBlock} frame={currentFrame}/>;
+  }
+
+  if (currentBlock.layout === 'flow_clip') {
+    const localWords = (words as WordData[]).filter(w => w.endFrame > currentBlock.startFrame && w.startFrame < currentBlock.startFrame + currentBlock.durationFrames);
+    const index = localWords.findIndex(w => w === activeWord);
+    if (index < 0) return null;
+    const group = localWords.slice(Math.floor(index / 4) * 4, Math.floor(index / 4) * 4 + 4);
+    const direction = textDirection(group.map(word => word.word).join(' '));
+    return <div dir={direction} style={{position:'absolute',left:85,right:85,top:(currentBlock.captionY ?? .8)*1920,
+      textAlign:'center',fontFamily:direction==='rtl'?'Lalezar, sans-serif':'Arial, sans-serif',fontWeight:700,fontSize:56,lineHeight:1.55,zIndex:50}}>
+      <div style={{display:'inline-block',maxWidth:'100%',padding:'10px 22px',borderRadius:12,background:'#101210e8'}}>
+        <CaptionWords words={group} wordStyle={i=>({color:group[i]===activeWord?'#ffffff':'#c4c7c2',margin:'0 7px',
+          borderBottom:group[i]===activeWord?('3px solid '+(currentBlock.flowAccent || '#ffdc65')):'3px solid transparent'})}/>
+      </div>
+    </div>;
+  }
 
   if (currentBlock.layout === 'reference_style') {
     const style = currentBlock.referenceStyle;

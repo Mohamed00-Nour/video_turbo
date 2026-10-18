@@ -1,5 +1,9 @@
 import React from "react";
-import { Series, useCurrentFrame, useVideoConfig } from "remotion";
+import { Series, getRemotionEnvironment, staticFile, useCurrentFrame, useVideoConfig } from "remotion";
+import {Audio} from "@remotion/media";
+import {FlowScenes} from "./flow/FlowScenes";
+import {FlowDepth} from "./flow/FlowDepth";
+import {FlowHeadlines} from "./flow/FlowHeadlines";
 import "./font.css";
 import timelineData from "./timeline.json";
 import { HookBlock } from "./HookBlock";
@@ -13,6 +17,8 @@ export const MainVideo: React.FC<{timeline?:typeof timelineData}> = ({timeline=t
   const currentFrame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const { blocks } = timeline;
+  const flowFinish = blocks.length>0 && blocks.every((block:any)=>block.layout==='flow_clip' && block.flowFinish!==false);
+  const flowAudio = (timeline as any).flowAudio;
   const movingReference=blocks.length>0 && blocks.every((block:any)=>block.layout==='reference_style' && block.referenceStyle?.renderer_version>=3);
 
   return (
@@ -25,7 +31,7 @@ export const MainVideo: React.FC<{timeline?:typeof timelineData}> = ({timeline=t
         overflow: "hidden",
       }}
     >
-      {movingReference ? <ReferenceScenes blocks={blocks}/> : <Series>
+      {flowFinish ? <FlowScenes blocks={blocks}/> : movingReference ? <ReferenceScenes blocks={blocks}/> : <Series>
         {blocks.map((block: any, index: number) => {
           if (block.type === "section") {
             return <Series.Sequence key={index} durationInFrames={block.durationFrames} premountFor={fps}>
@@ -88,6 +94,14 @@ export const MainVideo: React.FC<{timeline?:typeof timelineData}> = ({timeline=t
           return null;
         })}
       </Series>}
+
+      {flowFinish && <style>{`@font-face{font-family:ReferencePlex;src:url('${staticFile('reference-fonts/ibm-plex-sans-arabic-700.woff2')}');font-weight:700;font-style:normal;}@font-face{font-family:ReferencePlex;src:url('${staticFile('reference-fonts/ibm-plex-sans-arabic-400.woff2')}');font-weight:400;font-style:normal;}@font-face{font-family:ReferenceAmiri;src:url('${staticFile('reference-fonts/Amiri-Bold.ttf')}');font-weight:700;}@font-face{font-family:FlowDisplay;src:url('${staticFile('reference-fonts/Bodoni-Italic.ttf')}');font-style:italic;font-weight:400;}`}</style>}
+      {flowFinish && <FlowHeadlines blocks={blocks}/>}
+      {flowFinish && <FlowDepth accent={(blocks[0] as any).flowAccent || '#777777'} profile={(blocks[0] as any).flowFinishing}/>}
+      {flowFinish && flowAudio && getRemotionEnvironment().isStudio && <>
+        <Audio src={staticFile(flowAudio.voice)} premountFor={fps}/>
+        <Audio src={staticFile(flowAudio.effects)} premountFor={fps}/>
+      </>}
 
       {/* Global Caption Overlay */}
       <Caption currentFrame={currentFrame} timeline={timeline} />

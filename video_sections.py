@@ -1,9 +1,10 @@
 """Flexible sections sharing the video builder's background and captions."""
 from pathlib import Path
 import math
+from flow_style import finishing_style
 from pipeline_common import normalize_text
 
-LAYOUTS = {'background', 'single', 'split', 'title', 'cyber_breach', 'thermal_meltdown', 'zero_ransom', 'reference_style'}
+LAYOUTS = {'background', 'single', 'split', 'title', 'cyber_breach', 'thermal_meltdown', 'zero_ransom', 'reference_style', 'flow_clip'}
 VIDEO_EXTS = {'.mp4', '.mov', '.mkv', '.webm'}
 IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp'}
 BACKGROUND_NAMES = {'gta_background.mp4', 'roblox.mp4', 'fortnite.mp4'}
@@ -43,7 +44,19 @@ def public_media(relative):
     return 'sections/' + Path(relative).as_posix()
 
 
+def validate_flow_text(value):
+    if not isinstance(value, dict):
+        raise ValueError('Flow display text must contain a kicker, headline and support line.')
+    for key, limit in [('kicker', 90), ('headline', 48), ('support', 90)]:
+        if not isinstance(value.get(key), str) or len(value[key]) > limit or (key == 'headline' and not value[key].strip()):
+            raise ValueError('Invalid Flow display ' + key + '.')
+    return value
+
+
 def validate_sections(config, project):
+    if 'flow_finish' in config and not isinstance(config['flow_finish'], bool):
+        raise ValueError('Flow finishing must be enabled or disabled.')
+    finishing_style(config.get('flow_style', {}).get('finishing'))
     sections = config.get('sections')
     if not isinstance(sections, list) or not sections:
         raise ValueError('Add at least one section to your video.')
@@ -63,6 +76,11 @@ def validate_sections(config, project):
         for key in ('media', 'secondary_media'):
             if section.get(key):
                 media_path(project, section[key])
+        if layout == 'flow_clip':
+            if 'flow_text' in section: validate_flow_text(section['flow_text'])
+            if not section.get('media') or media_path(project, section['media']).suffix.lower() not in VIDEO_EXTS:
+                raise ValueError('Add a video clip to every Flow scene.')
+            if section.get('transition', 'cut') not in ('cut', 'fade'): raise ValueError('Choose cut or fade for a Flow scene.')
         if layout in {'single', 'split'} and not section.get('media'):
             raise ValueError(f"Add a clip or screenshot to section: {section.get('title', 'Untitled')}")
         if layout == 'split' and not section.get('secondary_media'):
@@ -160,7 +178,7 @@ def make_timeline(config, project, public, words, duration, probe, fps=30):
         reference = section.get('layout') == 'reference_style'
         block = {**section, 'type': 'section', 'startFrame': starts[i],
                  'durationFrames': starts[i + 1] - starts[i], 'bgVideo': background,
-                 'bgDurationFrames': 1 if reference else frames(background), 'gtaOffset': 0.8 + i * 3.4,
+                 'bgDurationFrames': 1 if reference or section.get('layout') == 'flow_clip' else frames(background), 'gtaOffset': 0.8 + i * 3.4,
                  'captionY': float(section.get('caption_y', .76)), 'captions': section.get('captions', True)}
         for key in ('media', 'secondary_media'):
             if section.get(key):
@@ -170,6 +188,19 @@ def make_timeline(config, project, public, words, duration, probe, fps=30):
                               'durationFrames': frames(relative) if video else None}
             else:
                 block[key] = None
+        if section.get('layout') == 'flow_clip':
+            block['flowAccent'] = config.get('flow_style', {}).get('accent', '#777777')
+            block['flowFinish'] = config.get('flow_finish', True)
+            block['flowFinishing'] = finishing_style(config.get('flow_style', {}).get('finishing'))
+            palette = config.get('flow_style', {})
+            block['flowPalette'] = {key: palette.get(key, default) for key, default in [('background', '#f4f4f2'), ('background_end', '#e4e4e0'), ('ink', '#171717')]}
+            block['flowPalette']['caption_background'] = palette.get('caption_background', block['flowPalette']['background'])
+            block['flowText'] = section.get('flow_text', {'kicker': '', 'headline': section.get('title', ''), 'support': ''})
+            block['fade_in'] = section.get('transition') == 'fade'
+            block['fade_out'] = i + 1 < len(sections) and sections[i + 1].get('layout') == 'flow_clip' and sections[i + 1].get('transition') == 'fade'
+            available = block['media']['durationFrames']
+            if round(float(section.get('offset_seconds', 0)) * fps) + block['durationFrames'] > available:
+                raise ValueError('A Flow clip is shorter than its scene. Import a longer clip or reduce its trim point.')
         if reference:
             block['referenceStyle'] = config.get('reference_style', {})
             block['variant'] = section.get('variant', 'card')

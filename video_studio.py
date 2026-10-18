@@ -29,6 +29,7 @@ from analytics import Analytics
 from ai_generation import AIGenerator
 from ai_series import SeriesLibrary
 import reference_styles
+import flow_workflow
 import voice_generation
 
 ENGINE = Path(__file__).resolve().parent
@@ -168,10 +169,12 @@ class Studio:
         write_json(path / 'studio.json', editor)
         return self.register(path)
 
-    def create_reference(self, name, script, instructions='', provider=None):
+    def create_reference(self, name, script, instructions='', provider=None, workflow='reference', idea=''):
         self.idle()
-        if not isinstance(script, str) or not 1 <= len(script.strip()) <= 100000:
-            raise ValueError('Provide the exact spoken script for the reference-style video.')
+        if workflow not in ('reference', 'flow'): raise ValueError('Choose a supported creation path.')
+        if not isinstance(idea, str) or len(idea) > 10000: raise ValueError('Keep your idea below 10,000 characters.')
+        if not isinstance(script, str) or len(script.strip()) > 100000 or (not script.strip() and not (workflow == 'flow' and idea.strip())):
+            raise ValueError('Provide your spoken script, or a video idea for Google Flow.')
         if not isinstance(instructions, str) or len(instructions) > 10000:
             raise ValueError('Keep style instructions below 10,000 characters.')
         provider = provider or reference_styles.settings(self.data).get('provider', 'antigravity')
@@ -181,7 +184,21 @@ class Studio:
         editor.update(script=script.strip(), sections=[{'layout': 'title', 'title': 'Reference style', 'captions': True}])
         self.save(identifier, editor)
         write_json(self.project(identifier) / 'reference_style.json',
-                   {'status': 'awaiting_inputs', 'reference_file': '', 'instructions': instructions, 'analysis_provider': provider, 'error': ''})
+                   {'status': 'awaiting_inputs', 'reference_file': '', 'instructions': instructions, 'analysis_provider': provider, 'workflow': workflow, 'idea': idea.strip(), 'error': ''})
+        return self.load(identifier)
+
+    def approve_flow_script(self, identifier, script):
+        self.idle()
+        path = self.project(identifier)
+        state = read_cache(path / 'reference_style.json')
+        if state.get('workflow') != 'flow' or state.get('status') != 'script_review': raise ValueError('Generate a Flow script draft first.')
+        if state.get('draft_reference_signature') != reference_styles.file_signature(reference_styles.media_reference(path, state.get('reference_file', ''))):
+            raise ValueError('Your reference changed. Generate a fresh script draft first.')
+        flow_workflow.text(script, 100000, 'spoken script')
+        editor = self.load(identifier)['editor']; editor['script'] = script.strip()
+        self.save(identifier, editor)
+        state.update(status='awaiting_inputs', draft_script='', error='')
+        write_json(path / 'reference_style.json', state)
         return self.load(identifier)
 
     def reference_state(self, identifier):
@@ -196,6 +213,11 @@ class Studio:
             stale = stale or state.get('reference_signature') != reference_styles.file_signature(reference_styles.media_reference(path, state.get('reference_file', '')))
         except (ValueError, FileNotFoundError): stale = True
         state['stale'] = stale
+        if state.get('workflow') == 'flow' and state.get('flow_plan'):
+            state['flow_visual_direction'] = flow_workflow.visual_direction(state['flow_plan'])
+            state['flow_scenes'] = [{**row, 'image_prompt': flow_workflow.prompt_for(state['flow_plan'], row, 'image'),
+                                    'motion_prompt': flow_workflow.prompt_for(state['flow_plan'], row, 'motion')}
+                                   for row in flow_workflow.scene_rows(state['flow_plan'])]
         if state.get('status') == 'analyzing' and not (self.job and self.job.get('project') == identifier and self.job.get('status') in ('running','cancelling')):
             state.update(status='interrupted', error='Analysis was interrupted. Your files are saved; retry analysis.')
         return state
@@ -222,7 +244,7 @@ class Studio:
             if workflow and workflow.get('source') != 'import' and workflow.get('approved_script_hash') != fingerprint(script):
                 raise ValueError('Review and approve the current AI script before generating a voiceover.')
             reference = self.reference_state(identifier)
-            action = continuation or (('reference_build' if reference else 'build') if build else '')
+            action = continuation or ((('reference_plan' if reference.get('workflow') == 'flow' else 'reference_build') if reference else 'build') if build else '')
             config = read_cache(path / 'config.json')
             if action.startswith('reference_'):
                 reference_styles.media_reference(path, reference.get('reference_file', ''))
@@ -254,21 +276,25 @@ class Studio:
             state = self.reference_state(identifier)
             if not state: raise ValueError('Create a Reference Styles project first.')
             reference_styles.media_reference(path, state.get('reference_file', ''))
+            flow = state.get('workflow') == 'flow'
+            if flow: build = False
+            drafting = flow and not (path / 'script.txt').read_text('utf-8-sig').strip()
             selected_voice = voice_generation.project_state(path)
-            if selected_voice['source'] == 'elevenlabs' and (not selected_voice.get('generated_current') or selected_voice.get('stale')):
+            if not drafting and selected_voice['source'] == 'elevenlabs' and (not selected_voice.get('generated_current') or selected_voice.get('stale')):
                 if provider and provider not in reference_styles.PROVIDER_NAMES: raise ValueError('Choose Codex / ChatGPT or Antigravity / Gemini.')
                 state['analysis_provider'] = provider or state.get('analysis_provider')
                 state.pop('stale', None)
                 write_json(path / 'reference_style.json', state)
                 return self.start_voice(identifier, continuation='reference_build' if build else 'reference_plan')
-            voiceover_path(path)
+            if not drafting: voiceover_path(path)
             connections = reference_styles.settings(self.data)
             provider = provider or state.get('analysis_provider') or connections.get('provider', 'antigravity')
             if provider not in reference_styles.PROVIDER_NAMES: raise ValueError('Choose Codex / ChatGPT or Antigravity / Gemini.')
             selected = connections.get('providers', {}).get(provider, connections)
             if not selected['installed']:
                 raise ValueError('Connect the selected local AI provider before analyzing.')
-            if not (path / 'script.txt').read_text('utf-8-sig').strip(): raise ValueError('Add your spoken script first.')
+            if drafting and not state.get('idea'): raise ValueError('Add a video idea first.')
+            if not drafting and not (path / 'script.txt').read_text('utf-8-sig').strip(): raise ValueError('Add your spoken script first.')
             state.update(analysis_provider=provider)
             state.pop('stale', None)
             write_json(path / 'reference_style.json', state)
@@ -584,6 +610,7 @@ class Studio:
             reference = self.reference_state(identifier)
             if reference and (reference.get('status') not in ('ready', 'complete', 'render_failed') or reference.get('stale')):
                 raise ValueError('Analyze the current reference, script and voiceover before building.')
+            if reference.get('workflow') == 'flow': flow_workflow.validate_build(path, reference, config)
             if workflow and workflow.get('source') != 'import' and (workflow.get('status') not in ('assets_ready','complete','rendering','failed','interrupted') or workflow.get('approved_script_hash') != fingerprint(self.load(identifier)['editor']['script'].strip())):
                 raise ValueError('Approve the current script and prepare its assets before building.')
             if 'sections' in config:
@@ -675,7 +702,8 @@ class Studio:
                 reference = read_cache(path / 'reference_style.json')
                 if reference and action:
                     if job['status'] == 'complete':
-                        reference.update(status='ready' if action in ('reference_plan','preview') else 'complete', error='')
+                        if reference.get('workflow') == 'flow' and action == 'reference_plan': reference['error'] = ''
+                        else: reference.update(status='ready' if action in ('reference_plan','preview') else 'complete', error='')
                     else:
                         reference.update(status='render_failed' if action in ('build','preview') and reference.get('analysis') else job['status'], error=reference.get('error') or job.get('error',''))
                     write_json(path / 'reference_style.json', reference)
@@ -753,7 +781,7 @@ class Handler(BaseHTTPRequestHandler):
             if host not in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'):
                 self.json_response({'error': 'Use the localhost address.'}, 403); return
             if parsed.path == '/api/health':
-                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series', 'parallel-publishing', 'analytics', 'reference-styles', 'reference-codex', 'reference-models', 'elevenlabs-voice']})
+                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series', 'parallel-publishing', 'analytics', 'reference-styles', 'reference-codex', 'reference-models', 'elevenlabs-voice', 'google-flow-handoff', 'flow-portable-prompts']})
             elif parsed.path == '/api/state':
                 with self.studio.lock:
                     self.json_response({'token': self.studio.token, 'projects': self.studio.list_projects(),
@@ -763,6 +791,12 @@ class Handler(BaseHTTPRequestHandler):
                 with self.studio.lock: self.json_response(self.studio.voice.snapshot())
             elif parsed.path == '/api/voice/catalog':
                 self.json_response(self.studio.voice.catalog(refresh=query.get('refresh', ['0'])[0] == '1'))
+            elif parsed.path == '/api/reference/flow/pack':
+                with self.studio.lock:
+                    path = self.studio.project(query['id'][0])
+                    state = read_cache(path / 'reference_style.json')
+                    flow_workflow.current_plan(path, state)
+                    self.json_response({'text': flow_workflow.export_pack(state), 'filename': 'google-flow-production-pack.md'})
             elif parsed.path == '/api/reference/models':
                 self.json_response(reference_styles.available_models(self.studio.data, query.get('provider', [''])[0]))
             elif parsed.path == '/api/reference/settings':
@@ -856,6 +890,14 @@ class Handler(BaseHTTPRequestHandler):
                         if ext not in sections.VIDEO_EXTS: raise ValueError('Choose a video reference.')
                         if not read_cache(project / 'reference_style.json'): raise ValueError('Create a Reference Styles project first.')
                         target = project / 'reference' / ('source-' + uuid.uuid4().hex[:12] + ext)
+                    elif role == 'flow_clip':
+                        if ext not in sections.VIDEO_EXTS: raise ValueError('Choose a video downloaded from Flow.')
+                        reference = read_cache(project / 'reference_style.json')
+                        plan = flow_workflow.current_plan(project, reference)
+                        if query.get('plan_hash', [''])[0] != reference['plan_hash']: raise ValueError('The storyboard changed. Reload before importing.')
+                        scene = next((row for row in flow_workflow.scene_rows(plan) if row['id'] == query.get('scene', [''])[0]), None)
+                        if not scene: raise ValueError('Choose a scene in the current Flow storyboard.')
+                        target = project / 'media/flow' / (scene['id'] + '-' + uuid.uuid4().hex[:12] + ext)
                     elif role == 'media':
                         if ext not in sections.VIDEO_EXTS | sections.IMAGE_EXTS: raise ValueError('Choose a clip or screenshot.')
                         target = project / 'media' / (uuid.uuid4().hex[:12] + '-' + re.sub(r'[^\w .()-]', '', Path(name).stem)[:60] + ext)
@@ -870,12 +912,15 @@ class Handler(BaseHTTPRequestHandler):
                                 data = self.rfile.read(min(1024 * 1024, remaining))
                                 if not data: raise ValueError('Upload was interrupted.')
                                 out.write(data); remaining -= len(data)
+                        if role == 'flow_clip': flow_workflow.clip_info(pending, scene['duration_seconds'])
                         pending.replace(target)
                         if role == 'voice':
                             for suffix in ('.mp3', '.wav', '.m4a', '.flac', '.aac', '.ogg'):
                                 old = project / ('voiceover' + suffix)
                                 if old != target: old.unlink(missing_ok=True)
                     finally: pending.unlink(missing_ok=True)
+                    if role == 'flow_clip':
+                        flow_workflow.assign_clip(project, scene['id'], target.relative_to(project).as_posix(), plan_hash=reference['plan_hash'])
                     if role == 'reference':
                         reference = read_cache(project / 'reference_style.json')
                         reference.update(reference_file=target.relative_to(project).as_posix(), status='awaiting_inputs', error='')
@@ -900,7 +945,14 @@ class Handler(BaseHTTPRequestHandler):
                 elif parsed.path == '/api/voice/start':
                     result = self.studio.start_voice(data['id'], data.get('build', False) is True, data.get('force', False) is True)
                 elif parsed.path == '/api/reference/create':
-                    result = self.studio.create_reference(data['name'], data['script'], data.get('instructions', ''), data.get('provider'))
+                    result = self.studio.create_reference(data['name'], data['script'], data.get('instructions', ''), data.get('provider'), data.get('workflow', 'reference'), data.get('idea', ''))
+                elif parsed.path == '/api/reference/flow/approve':
+                    result = self.studio.approve_flow_script(data['id'], data['script'])
+                elif parsed.path == '/api/reference/flow/clip':
+                    self.studio.idle()
+                    path = self.studio.project(data['id'])
+                    flow_workflow.assign_clip(path, data['scene'], data['file'], data.get('offset_seconds', 0), data.get('plan_hash', ''))
+                    result = self.studio.load(data['id'])
                 elif parsed.path == '/api/reference/start':
                     result = self.studio.start_reference(data['id'], data.get('build', True) is True, data.get('provider'))
                 elif parsed.path == '/api/reference/settings':
@@ -994,7 +1046,7 @@ class StudioServer(ThreadingHTTPServer):
         super().server_bind()
 
 
-def running_studio(url, require_series=False, require_parallel=False, require_analytics=False, require_reference=False, require_codex=False, require_models=False, require_voice=False):
+def running_studio(url, require_series=False, require_parallel=False, require_analytics=False, require_reference=False, require_codex=False, require_models=False, require_voice=False, require_flow=False):
     """Identify this studio without changing its projects or interrupting a job."""
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -1008,7 +1060,8 @@ def running_studio(url, require_series=False, require_parallel=False, require_an
                 and (not require_reference or 'reference-styles' in data.get('features', []))
                 and (not require_codex or 'reference-codex' in data.get('features', []))
                 and (not require_models or 'reference-models' in data.get('features', []))
-                and (not require_voice or 'elevenlabs-voice' in data.get('features', [])))
+                and (not require_voice or 'elevenlabs-voice' in data.get('features', []))
+                and (not require_flow or ('google-flow-handoff' in data.get('features', []) and 'flow-portable-prompts' in data.get('features', []))))
     except (OSError, ValueError, TypeError):
         return False
 
@@ -1038,7 +1091,7 @@ def main():
             server = StudioServer(('127.0.0.1', port), Handler)
             break
         except OSError as error:
-            if running_studio(url, require_series=True, require_parallel=True, require_analytics=True, require_reference=True, require_codex=True, require_models=True, require_voice=True):
+            if running_studio(url, require_series=True, require_parallel=True, require_analytics=True, require_reference=True, require_codex=True, require_models=True, require_voice=True, require_flow=True):
                 print(f'Video Turbo Studio is already running: {url}', flush=True)
                 if not args.no_browser: webbrowser.open(url)
                 return 0

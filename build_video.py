@@ -16,6 +16,7 @@ import urllib.request
 import argparse
 import math
 import video_sections
+from flow_style import display_font_source
 from pipeline_common import (file_digest, file_signature, fingerprint, read_cache,
                              write_json, voiceover_path, plan_game_timing)
 
@@ -106,7 +107,7 @@ def check_required_files():
 
     # 1. Background video (check project folder, fallback to engine folder)
     gta_bg = PROJECT_PATH / "gta_background.mp4"
-    needs_background = any(row.get("layout") != "reference_style" for row in load_config().get("sections", [{}]))
+    needs_background = any(row.get("layout") not in ("reference_style", "flow_clip") for row in load_config().get("sections", [{}]))
     if needs_background and not gta_bg.exists():
         if (ENGINE_DIR / "gta_background.mp4").exists():
             gta_bg = ENGINE_DIR / "gta_background.mp4"
@@ -942,7 +943,7 @@ def sync_public_assets() -> dict:
         outputs[relative] = file_signature(target)
 
     config = load_config()
-    needs_background = any(row.get("layout") != "reference_style" for row in config.get("sections", [{}]))
+    needs_background = any(row.get("layout") not in ("reference_style", "flow_clip") for row in config.get("sections", [{}]))
     for name, aliases in {
         "gta_background.mp4": ["gta_background.mp4"],
         "roblox.mp4": ["roblox.mp4", "Roblox 1.mp4"],
@@ -961,9 +962,13 @@ def sync_public_assets() -> dict:
             for field in ("media", "secondary_media"):
                 if section.get(field):
                     publish(video_sections.media_path(PROJECT_PATH, section[field]), video_sections.public_media(section[field]))
-    if config.get("reference_style"):
+    if config.get("reference_style") or any(row.get("layout") == "flow_clip" for row in config.get("sections", [])):
         for name in ("ibm-plex-sans-arabic-700.woff2", "Amiri-Bold.ttf"):
             publish(ENGINE_DIR / "studio/ui-fonts" / name, "reference-fonts/" + name)
+        if any(row.get("layout") == "flow_clip" for row in config.get("sections", [])):
+            if config.get("flow_style", {}).get("finishing", {}).get("headline_font") == "serif":
+                publish(display_font_source(ENGINE_DIR), "reference-fonts/Bodoni-Italic.ttf")
+            publish(ENGINE_DIR / "studio/ui-fonts/ibm-plex-sans-arabic-400.woff2", "reference-fonts/ibm-plex-sans-arabic-400.woff2")
     for game in ([] if "sections" in config else get_game_definitions(config)):
         top, bottom = resolve_game_clips(game["path"])
         for clip in {top, bottom}:
@@ -1036,7 +1041,7 @@ def render_remotion_video(raw_output: Path):
 
 
 def process_audio_and_mux(raw_video: Path, final_output: Path, total_duration: float,
-                          vo: Path | None = None):
+                          vo: Path | None = None, *, sfx: Path | None = None):
     """Measure and normalize the complete mix, then mux it with the rendered video."""
     vo = vo or voiceover_path(PROJECT_PATH)
     norm_audio = OUTPUT_DIR / "normalized_audio.aac"
@@ -1052,7 +1057,14 @@ def process_audio_and_mux(raw_video: Path, final_output: Path, total_duration: f
                "[vo][bgm]amix=inputs=2:duration=first:normalize=0[mix];")
     else:
         mix = f"[0:a]apad,atrim=duration={total_duration}[mix];"
+    if sfx is not None:
+        effect_input = 2 if music.is_file() else 1
+        inputs += ["-i", str(sfx)]
+        mix = mix.replace("[mix];", "[base];")
+        mix += (f"[{effect_input}:a]apad,atrim=duration={total_duration}[sfx];"
+                "[base][sfx]amix=inputs=2:duration=first:normalize=0[mix];")
     key = fingerprint({"version": 1, "voice": file_digest(vo),
+                       "sfx": file_digest(sfx) if sfx is not None else None,
                        "music": file_digest(music) if music.is_file() else None,
                        "mix": mix, "normalization": "two-pass-I-14-TP-1.5-LRA11"})
     old = read_cache(cache_path)
@@ -1124,6 +1136,11 @@ def main(argv=None) -> int:
         transcription = transcribe_voiceover(vo_file, force=args.retranscribe)
         transcription = apply_script(transcription, vo_duration)
         timeline = build_timeline(transcription, vo_duration)
+        from flow_finishing import prepare_flow_audio
+        flow_sfx = prepare_flow_audio(timeline, vo_file, OUTPUT_DIR, PUBLIC_DIR)
+        if flow_sfx:
+            write_json(CODE_DIR / "src" / "timeline.json", timeline)
+            write_json(OUTPUT_DIR / "timeline.json", timeline)
 
         if args.preview_only:
             if not math.isfinite(args.preview_at) or not 0 <= args.preview_at < timeline["totalDuration"]:
@@ -1153,7 +1170,7 @@ def main(argv=None) -> int:
             log("Timeline, assets and code unchanged; reusing rendered video.")
 
         final_mp4 = OUTPUT_DIR / "final.mp4"
-        process_audio_and_mux(raw_video, final_mp4, timeline["totalDuration"], vo_file)
+        process_audio_and_mux(raw_video, final_mp4, timeline["totalDuration"], vo_file, sfx=flow_sfx)
         if not args.no_preview:
             export_preview_frames(final_mp4)
         log(f"BUILD COMPLETE: {final_mp4} ({timeline['totalDuration']}s)")
