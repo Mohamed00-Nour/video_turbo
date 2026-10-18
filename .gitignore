@@ -36,3 +36,7 @@ Thumbs.db
 
 # Local video studio projects
 /projects/
+
+# Local standalone video projects
+/code/french-hackers/
+/code/promo/
