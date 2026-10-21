@@ -107,7 +107,7 @@ def check_required_files():
 
     # 1. Background video (check project folder, fallback to engine folder)
     gta_bg = PROJECT_PATH / "gta_background.mp4"
-    needs_background = any(row.get("layout") not in ("reference_style", "flow_clip") for row in load_config().get("sections", [{}]))
+    needs_background = any(row.get("layout") not in ("reference_style", "flow_clip", "pc_intro", "pc_demo") for row in load_config().get("sections", [{}]))
     if needs_background and not gta_bg.exists():
         if (ENGINE_DIR / "gta_background.mp4").exists():
             gta_bg = ENGINE_DIR / "gta_background.mp4"
@@ -240,7 +240,8 @@ def transcribe_voiceover(audio_path: Path, force: bool = False) -> dict:
                              "model": model_name, "language": "ar",
                              "vocabulary": config.get("vocabulary", []),
                              "corrections": config.get("corrections", {}),
-                             "defaults": [DEFAULT_VOCABULARY, DEFAULT_CORRECTIONS]})
+                             "defaults": [DEFAULT_VOCABULARY, DEFAULT_CORRECTIONS],
+                             **({"pc_recognition": "short-windows-v1"} if config.get("pc_tips") else {})})
     result = read_cache(words_file)
     if not force and result.get("cacheKey") == cache_key and isinstance(result.get("words"), list):
         log("Voiceover unchanged; reusing cached transcription.")
@@ -269,8 +270,13 @@ def transcribe_voiceover(audio_path: Path, force: bool = False) -> dict:
         vad_filter=True,
         condition_on_previous_text=False,
     )
+    # Short PC tutorials mix Arabic speech with English UI labels. Resetting
+    # shorter windows without the long script hint prevents repeated intro text
+    # from replacing a later Windows-version branch in the timing guide.
+    if config.get("pc_tips"):
+        kwargs.update(chunk_length=20, initial_prompt=None, vad_filter=False)
     try:
-        segments, info = model.transcribe(str(audio_path), hotwords=" ".join(vocab), **kwargs)
+        segments, info = model.transcribe(str(audio_path), hotwords=None if config.get("pc_tips") else " ".join(vocab), **kwargs)
     except TypeError:
         # older faster-whisper without 'hotwords'
         segments, info = model.transcribe(str(audio_path), **kwargs)
@@ -441,10 +447,10 @@ def align_script_to_words(script_tokens: list, whisper_words: list, vo_duration:
                         f"estimating {len(gap_s)} script words across "
                         f"{lo:.2f}-{hi:.2f}s between matched words.")
                 if _match_form(heard) != _match_form(said):
-                    notes.append(f"{lo:5.2f}s  recording: '{heard}'  | script: '{said}'")
+                    notes.append(f"{lo:5.2f}s  transcript: '{heard}'  | script: '{said}'")
             else:
                 said = " ".join(S[k] for k in gap_s)
-                notes.append(f"{lo:5.2f}s  not found in the recording: '{said}'")
+                notes.append(f"{lo:5.2f}s  not found in the transcript: '{said}'")
                 if edge == "lead":
                     lo = max(0.0, hi - 0.3 * len(gap_s))
                 elif edge == "trail":
@@ -477,10 +483,9 @@ def align_script_to_words(script_tokens: list, whisper_words: list, vo_duration:
     flush(vo_duration, edge="trail")
 
     pct = 100.0 * anchors / max(1, n)
-    log(f"Script alignment: {anchors}/{n} words matched the recording directly ({pct:.0f}%).")
+    log(f"Script alignment guide: {anchors}/{n} words matched the transcript ({pct:.0f}%).")
     if pct < 60:
-        log("WARNING: the script and the recording differ a lot. Check that script.txt is the "
-            "text you actually read, in the same order.")
+        log("WARNING: the transcript differs from the script. Missing transcription may still be present in the audio.")
     if notes:
         log("Places worth checking (script spelling is used anyway):")
         for line in notes[:25]:
@@ -514,7 +519,9 @@ def _alignment_chunks(script_tokens, guide, duration, encode):
     chunks = []
     first = 0
     while first < len(groups):
-        lo = max(0., guide[first]["start"] - .35)
+        # The timing guide can miss the opening and invent a late first word.
+        # Keep the real audio start so direct alignment can recover that speech.
+        lo = 0. if first == 0 else max(0., guide[first]["start"] - .35)
         last, count = first, 0
         while last < len(groups):
             size = len(groups[last])
@@ -606,7 +613,7 @@ def apply_script(transcription: dict, vo_duration: float) -> dict:
         return transcription
     audio = voiceover_path(PROJECT_PATH)
     model_name = load_config().get("whisper_model", "large-v3")
-    cache_key = fingerprint({"version": 2, "method": "audio-attention",
+    cache_key = fingerprint({"version": 3, "method": "audio-attention",
                              "audio": file_digest(audio), "script": tokens,
                              "duration": vo_duration, "model": model_name,
                              "guide": transcription.get("words", []) if vo_duration > 30 else None})
@@ -943,7 +950,7 @@ def sync_public_assets() -> dict:
         outputs[relative] = file_signature(target)
 
     config = load_config()
-    needs_background = any(row.get("layout") not in ("reference_style", "flow_clip") for row in config.get("sections", [{}]))
+    needs_background = any(row.get("layout") not in ("reference_style", "flow_clip", "pc_intro", "pc_demo") for row in config.get("sections", [{}]))
     for name, aliases in {
         "gta_background.mp4": ["gta_background.mp4"],
         "roblox.mp4": ["roblox.mp4", "Roblox 1.mp4"],

@@ -152,7 +152,7 @@ The complete voice/music mix is normalized in two passes to -14 LUFS with a
 -1.5 dB true-peak target. Music loops if it is shorter than the video, with fades
 at the start and end. Unchanged normalized mixes are cached.
 
-When `script.txt` is present, captions align the supplied text directly to the voiceover using the installed Whisper model's audio attention. This includes words omitted by transcription, such as English game names in Arabic narration. The text must match what you actually said. Short recordings align in one pass; longer ones use transcription to locate bounded audio windows. Several consecutive unplaced words stop the build with a clear error instead of producing guessed captions. Direct alignment is cached in `output/words_aligned.json` and refreshes when the audio, script, model or relevant timing inputs change. Without a script, captions use the transcription's word timestamps. `output/words.json` caches transcription and refreshes when the voiceover content changes. Scripts that cannot fit at least one frame per caption are rejected.
+When `script.txt` is present, captions align the supplied text directly to the voiceover using the installed Whisper model's audio attention. This includes words omitted by transcription, such as English game names in Arabic narration. The text must match what you actually said. Short recordings align in one pass; longer ones use transcription to locate bounded audio windows. The first window always starts at the beginning of the recording, even if transcription misses the opening speech. Several consecutive unplaced words stop the build with a clear error instead of producing guessed captions. Direct alignment is cached in `output/words_aligned.json` and refreshes when the audio, script, model or relevant timing inputs change. Without a script, captions use the transcription's word timestamps. `output/words.json` caches transcription and refreshes when the voiceover content changes. Scripts that cannot fit at least one frame per caption are rejected.
 
 ## Verify caption alignment
 
@@ -899,3 +899,170 @@ python build_video.py --project "projects/first flow-e01081" --preview-only --pr
 python -m unittest test_flow_finishing test_flow_workflow test_audio_finalization
 node code/tests/flow-finish.cjs
 ```
+
+## PC Tips & Tricks series
+
+Use **PC Tips & Tricks** in Studio's sidebar to create numbered Shorts and Reels.
+The entire series targets **Windows 10**. Each episode uses one practical tip, fast Egyptian Arabic narration, and the same
+animated opening title with a different PC setup. The series rotates RGB gaming,
+bright minimal, warm premium, futuristic, and cozy daylight setups. Wallpapers
+and accessories vary for later parts. Part numbers are reserved when projects
+are created, survive restarts, and are kept on retry; deleted episodes leave gaps.
+
+Every new episode follows **numbered opening → visible problem → solution →
+visible result**. The hook describes and demonstrates the symptom before any
+settings instructions. Animated walkthroughs render it as a separate labeled
+problem clip; real recordings must begin with that same demonstration.
+When uploading footage, **What to record, in order** shows action-by-action
+Egyptian Arabic instructions with exact menu labels, Windows 10 and
+visible checkpoints. Capture the problem for 3–5 seconds, perform the solution,
+then repeat the opening action and hold the successful result. Use Windows 10 for every shot.
+**Copy recording steps** copies the guide; it is also saved as
+recording-guide.txt beside the script and in the export package.
+Older episodes show **Add problem opening & rebuild**. This preserves the
+solution and part number, backs up the previous script, and prepares a new hook
+and recording guide. Previous footage stays on disk; animation is regenerated,
+and real footage needs a new upload containing the problem. Existing uploaded
+narration must be re-recorded to include the new hook.
+
+New plans, narration, recording instructions and tutorial visuals use Windows 10
+only. Every step is checked against Windows 10 documentation. Saved episodes with
+mixed-version instructions show **Update to Windows 10 & rebuild**. Continuing
+re-researches the same technique, backs up the previous script and plan, and
+regenerates its footage. Uploaded narration needs a new recording after conversion.
+Existing Windows 10 animations show **Rebuild Windows 10 animation** when their
+renderer is outdated. Previous media files stay on disk.
+
+
+1. Open **Google first, fallback & recording session**. Scripts, animated scene
+   plans, screen-action decisions and sampled-frame reviews try **Gemini through
+   the signed-in Antigravity CLI first** (default `gemini-3.8-flash-high`).
+   **ChatGPT through signed-in Codex** (default `gpt-6.1-sol`) is the fallback
+   when Google is unavailable, reaches its limits, returns invalid data, or fails
+   the candidate quality review. Each new step tries Google again.
+   Setup images try Google's native image-generation tool, then ChatGPT's native
+   tool, with artifact validation and visual review before accepting the image.
+   **Check Google-first connection** makes a small request and reports which
+   connection answered. Both executable paths and model IDs can be set here.
+   Existing episodes and accepted assets are reused; changing the provider order
+   does not regenerate them. Attempts and rejection reasons appear in the job log
+   and `<project>/reference/pc-ai-routing.json`. Rejected structured candidates are
+   retained in `reference/pc-last-candidate-<provider>.json`; Google's latest result
+   and tool states are in `reference/antigravity-response.json`. Empty output after
+   a blocked tool request is distinguished from non-JSON output.
+   The existing **Google Flow** workflow prepares prompts and imports generated
+   clips. There is currently no automatic Flow generation connection; PC setup
+   generation continues through Google native images, then ChatGPT. Generated
+   room imagery is separate from precise tutorial UI, which renders locally.
+   No separately billed AI API is used. The clients retain their own credentials.
+   API-key ChatGPT login is refused, API environment overrides are removed, and
+   Antigravity with extra-credit spending enabled is refused. Studio does not
+   purchase credits or enable overage. Included subscription limits apply.
+2. Choose a **Video type** and click **Generate video**. Types include PC speed,
+   shortcuts, useful Windows apps, file organization, common fixes, and **AI chooses**.
+   No idea or project name is required. AI chooses a specific tip, researches it,
+   writes the Egyptian Arabic script, then continues production. It checks the
+   series topic history and stable technique IDs to avoid repeating previous tips;
+   a duplicate is reselected once, then stopped if it repeats again. The chosen
+   idea and script are saved, so continuing a project keeps the same episode.
+   The script is saved in `script.txt`, with one narration line per tutorial step.
+3. Choose **Tutorial visuals**: **Windows 10 animated walkthrough** or
+   **Real Windows 10 screen recording**. New installations default to animation;
+   existing saved recording preferences are preserved. The episode panel can
+   switch a waiting episode too; click **Continue production** to apply the choice.
+   **Series settings** saves the default for future episodes.
+   Animated walkthroughs use Google-first routing to plan and review structured scenes,
+   then render them locally with Remotion. Both the footage and tutorial labels
+   identify them as illustrations, with Windows 10 shown. The simulation uses a left-aligned taskbar, square window
+   frames, Segoe UI, classic context menus, and separate Settings, File Explorer,
+   Clipboard, Notepad, Start, Task Manager and Control Panel layouts. Multi-window
+   scenes show Notepad and Calculator overlapping, switching focus, snapping left/right,
+   dismissing Snap Assist, and entering a verified addition. Animated idea selection
+   checks these rendering capabilities before saving a script. Minimizing, restoring
+   and closing windows are unsupported; illustrative app rows cannot prove resource
+   savings. Animated performance episodes support a documented acrylic-transparency
+   tip: open the same Start menu before and after turning off **Transparency effects**
+   in Windows 10 **Personalization > Colors**. Start and the taskbar actually switch
+   from translucent/blurred to solid backgrounds; no benchmark or measured resource
+   savings are invented. Both endpoint views and the toggle are validated. Script drafts get one bounded repair per provider after validation or
+   quality rejection, followed by another independent review. An automatically
+   chosen idea may be replaced within the selected video type when it cannot meet
+   these requirements; a user-specified technique is preserved. Walkthrough plans
+   require one entry per shot (including the opening problem) and get one bounded
+   repair attempt per provider after validation or quality rejection. This mode
+   never captures the desktop, uses its mouse, or runs AI-generated code.
+   Scene plans and finished clips are cached for retries.
+   For real footage, choose the dedicated recorder or upload your recording.
+   Switching modes keeps the script, part number and narration; previous media
+   stays on disk but is detached from the edit.
+   **Production settings** are saved for later episodes. Narration defaults to
+   your **ElevenLabs** default voice. Configure your default
+   ElevenLabs voice and model once in Voice settings. You can instead choose to
+   upload your narration or a real screen recording. To run
+   automatically, launch Studio inside a **dedicated Windows 10 test session** with
+   the required apps installed, then explicitly enable its recording runner.
+   The runner controls that session's mouse and keyboard; it is not a remote VM
+   provisioning service. It uses Pillow screenshots, Windows input APIs, and
+   FFmpeg capture. AI response time is excluded from the action clips. Each
+   step must produce a visible result before the runner accepts it; unsupported
+   actions, blocked decisions, or unmet requirements stop the episode.
+   Automatic ideas use built-in Windows apps to avoid installation, sign-in,
+   administrator prompts and restart requirements.
+4. Leave **Continue through production automatically** enabled in Production settings for production through
+   export. Disable it to read/edit the script before starting asset generation.
+   Missing recordings, narration, voice connection, or runner setup pause production with a
+   specific next step. Uploading the missing recording or voiceover resumes it.
+   **Series settings** in the episode panel opens the saved preferences and connections without
+   creating another episode.
+5. The existing audio alignment and normalization pipeline builds the video.
+   Recorded steps are fitted to their narration windows, with the complete
+   action and result retained. The intro ends when the first tutorial narration
+   starts. Keep the numbered opening and the step-per-line structure when editing
+   narration so shot cues remain aligned.
+6. A model reviews sampled intro, problem and tutorial frames for visible layout/content issues.
+   This review does not inspect every frame or assess audio pronunciation.
+   Format checks and a successful review are required before Studio presents
+   the episode as a completed export. Changed scripts, narration, media or saved
+   scene settings invalidate the older completed export.
+
+The project output contains `final.mp4` (1080 x 1920), `cover.jpg`,
+`captions.srt`, `post-caption.txt`, and `sources.json`. The cover and post caption
+are available from the episode panel; the existing video download and Publishing
+workflow remain available after completion. Production does not automatically post.
+
+Retries reuse saved scripts, setup images, verified recordings, matching
+ElevenLabs takes, render caches, and successful reviews of an unchanged export.
+There are no automatic paid API fallbacks. Eligible AI steps use your Google
+subscription first, followed by ChatGPT. Candidate content is validated and
+reviewed before acceptance. A failed final video review remains a failure: Studio
+does not ask another reviewer merely to override a reported defect. If both
+connections fail, progress is retained and production stops.
+Optional ElevenLabs narration still uses your ElevenLabs account; uploading
+your recording avoids that service.
+
+Configuration and history: `output/pc_tips/settings.json` and
+`output/pc_tips/series.json`. Episode state, plan, source links and review results
+are in `<project>/pc_tips.json`. PC settings contain model IDs, executable paths and production preferences.
+Authentication remains with the local Antigravity and Codex clients; Studio does not read, copy or export its credentials.
+
+Offline verification (no provider requests or desktop control):
+
+```powershell
+python -m unittest -v test_pc_tips test_video_studio test_ai_generation
+node code/tests/pc-tips.cjs
+```
+
+The browser/render check uses a separate validation server; start it with the
+following command, then run the Node check from another terminal. It uses isolated
+data under `output/pc-tips-review` and does not connect or publish accounts.
+
+```powershell
+python -c "from http.server import ThreadingHTTPServer; from pathlib import Path; from video_studio import Studio, Handler; p=Path('output/pc-tips-review'); s=ThreadingHTTPServer(('127.0.0.1',8772),Handler); s.studio=Studio(p/'ui-data',p/'ui-projects'); s.serve_forever()"
+```
+
+Subscription references: [Antigravity headless sign-in and permissions](https://antigravity.google/docs/cli/headless/),
+[Google models and native image generation](https://antigravity.google/docs/models/),
+[Google subscription benefits](https://support.google.com/googleone/answer/14534406?hl=en),
+[ChatGPT sign-in](https://learn.chatgpt.com/docs/auth),
+[native image generation](https://learn.chatgpt.com/docs/image-generation),
+[subscription usage limits](https://learn.chatgpt.com/docs/pricing).

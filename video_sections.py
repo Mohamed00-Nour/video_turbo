@@ -1,10 +1,11 @@
 """Flexible sections sharing the video builder's background and captions."""
 from pathlib import Path
 import math
+import re
 from flow_style import finishing_style
 from pipeline_common import normalize_text
 
-LAYOUTS = {'background', 'single', 'split', 'title', 'cyber_breach', 'thermal_meltdown', 'zero_ransom', 'reference_style', 'flow_clip'}
+LAYOUTS = {'background', 'single', 'split', 'title', 'cyber_breach', 'thermal_meltdown', 'zero_ransom', 'reference_style', 'flow_clip', 'pc_intro', 'pc_demo'}
 VIDEO_EXTS = {'.mp4', '.mov', '.mkv', '.webm'}
 IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp'}
 BACKGROUND_NAMES = {'gta_background.mp4', 'roblox.mp4', 'fortnite.mp4'}
@@ -64,6 +65,14 @@ def validate_sections(config, project):
         layout = section.get('layout', 'single')
         if layout not in LAYOUTS:
             raise ValueError(f'Unknown section layout: {layout}')
+        if layout in ('pc_intro', 'pc_demo'):
+            if not section.get('media'): raise ValueError('Add a PC setup image or real tutorial recording.')
+            suffix = media_path(project, section['media']).suffix.lower()
+            if layout == 'pc_intro' and suffix not in IMAGE_EXTS: raise ValueError('The PC intro needs a setup image.')
+            if layout == 'pc_demo' and suffix not in VIDEO_EXTS: raise ValueError('The PC tutorial needs a real screen recording.')
+            part = section.get('part')
+            if isinstance(part, bool) or not isinstance(part, int) or not 1 <= part <= 99999: raise ValueError('Use a valid episode number.')
+            if not isinstance(section.get('accent'), str) or not re.fullmatch(r'#[0-9a-fA-F]{6}', section['accent']): raise ValueError('Use a valid PC theme color.')
         if layout == 'reference_style':
             if not config.get('reference_style'):
                 raise ValueError('Analyze a reference before using reference-style scenes.')
@@ -178,7 +187,7 @@ def make_timeline(config, project, public, words, duration, probe, fps=30):
         reference = section.get('layout') == 'reference_style'
         block = {**section, 'type': 'section', 'startFrame': starts[i],
                  'durationFrames': starts[i + 1] - starts[i], 'bgVideo': background,
-                 'bgDurationFrames': 1 if reference or section.get('layout') == 'flow_clip' else frames(background), 'gtaOffset': 0.8 + i * 3.4,
+                 'bgDurationFrames': 1 if reference or section.get('layout') in ('flow_clip', 'pc_intro', 'pc_demo') else frames(background), 'gtaOffset': 0.8 + i * 3.4,
                  'captionY': float(section.get('caption_y', .76)), 'captions': section.get('captions', True)}
         for key in ('media', 'secondary_media'):
             if section.get(key):
@@ -188,6 +197,10 @@ def make_timeline(config, project, public, words, duration, probe, fps=30):
                               'durationFrames': frames(relative) if video else None}
             else:
                 block[key] = None
+        if section.get('layout') == 'pc_demo':
+            available = block['media']['durationFrames'] - round(float(section.get('offset_seconds', 0)) * fps)
+            rate = available / block['durationFrames']
+            if not 1 / 16 <= rate <= 16: raise ValueError('The PC recording trim cannot fit this narration. Adjust its trim or the narration length.')
         if section.get('layout') == 'flow_clip':
             block['flowAccent'] = config.get('flow_style', {}).get('accent', '#777777')
             block['flowFinish'] = config.get('flow_finish', True)

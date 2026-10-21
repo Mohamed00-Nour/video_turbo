@@ -5,12 +5,15 @@ import { FlashTransition } from './FlashTransition';
 import { CyberBreachScene } from './CyberBreachScene';
 import { ThermalMeltdownScene } from './ThermalMeltdownScene';
 import { ZeroRansomScene } from './ZeroRansomScene';
+import {PcTipsScene} from './PcTipsScene';
 import { ReferenceStyleScene } from './ReferenceStyleScene';
 
 type Media = { src: string; kind: string; durationFrames?: number };
 export const SectionBlock: React.FC<{ block: any; blur: number }> = ({ block, blur }) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
+
+  if (block.layout === 'pc_intro' || block.layout === 'pc_demo') return <PcTipsScene block={block}/>;
 
   if (block.layout === 'flow_clip') {
     const fade = Math.max(1, Math.min(Math.round(.15 * fps), Math.floor(block.durationFrames / 3)));

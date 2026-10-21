@@ -59,7 +59,7 @@ export const Caption: React.FC<CaptionProps> = ({ currentFrame, timeline=timelin
     return <FlowCaption words={words} activeWord={activeWord} block={currentBlock} frame={currentFrame}/>;
   }
 
-  if (currentBlock.layout === 'flow_clip') {
+  if (currentBlock.layout === 'flow_clip' || currentBlock.layout === 'pc_demo') {
     const localWords = (words as WordData[]).filter(w => w.endFrame > currentBlock.startFrame && w.startFrame < currentBlock.startFrame + currentBlock.durationFrames);
     const index = localWords.findIndex(w => w === activeWord);
     if (index < 0) return null;
@@ -69,7 +69,7 @@ export const Caption: React.FC<CaptionProps> = ({ currentFrame, timeline=timelin
       textAlign:'center',fontFamily:direction==='rtl'?'Lalezar, sans-serif':'Arial, sans-serif',fontWeight:700,fontSize:56,lineHeight:1.55,zIndex:50}}>
       <div style={{display:'inline-block',maxWidth:'100%',padding:'10px 22px',borderRadius:12,background:'#101210e8'}}>
         <CaptionWords words={group} wordStyle={i=>({color:group[i]===activeWord?'#ffffff':'#c4c7c2',margin:'0 7px',
-          borderBottom:group[i]===activeWord?('3px solid '+(currentBlock.flowAccent || '#ffdc65')):'3px solid transparent'})}/>
+          borderBottom:group[i]===activeWord?('3px solid '+(currentBlock.accent || currentBlock.flowAccent || '#ffdc65')):'3px solid transparent'})}/>
       </div>
     </div>;
   }

@@ -41,6 +41,12 @@ class GameplayPreparationTests(unittest.TestCase):
         dest.write_text(str(duration))
         return True
 
+    def test_installed_node_is_enabled_for_youtube_challenges(self):
+        with patch.object(assets.shutil,'which',return_value='C:/node/node.exe'):
+            self.assertEqual(assets.youtube_runtime_options()['js_runtimes']['node']['path'],'C:/node/node.exe')
+        with patch.object(assets.shutil,'which',return_value=None):
+            self.assertEqual(assets.youtube_runtime_options(),{})
+
     def test_preflight_metadata_reuses_resolved_streams_without_extraction(self):
         self.assertTrue(assets.prepare_gameplay(self.url, 4, self.game, info={'duration': 600}))
         self.fetch.assert_not_called()

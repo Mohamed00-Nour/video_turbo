@@ -256,11 +256,17 @@ def clip_ranges(video_duration: float, requested: float) -> tuple[float, float, 
     return round(top, 3), round(bottom, 3), duration
 
 
+def youtube_runtime_options() -> dict:
+    # yt-dlp enables only Deno by default; reuse the Node runtime required by Remotion.
+    node = shutil.which("node")
+    return {"js_runtimes": {"deno": {}, "node": {"path": node}}} if node else {}
+
+
 def fetch_video_info(url: str) -> dict:
     import yt_dlp
     # Metadata only: no video or audio is downloaded here.
     with yt_dlp.YoutubeDL({"format": VIDEO_FORMAT, "noplaylist": True,
-                          "quiet": True, "socket_timeout": 30}) as ydl:
+                          "quiet": True, "socket_timeout": 30, **youtube_runtime_options()}) as ydl:
         info = ydl.extract_info(url, download=False)
     if not info or info.get("is_live") or not info.get("duration"):
         raise ValueError("Use an uploaded gameplay video with a known duration, not a live stream.")
@@ -323,6 +329,7 @@ def download_youtube(info: dict, start: float, duration: float, dest: Path) -> b
             ]},
             "fixup": "never",
         }
+        options.update(youtube_runtime_options())
         with yt_dlp.YoutubeDL(options) as ydl:
             # Reuse freshly resolved stream URLs for both clips; do not extract twice.
             ydl.process_ie_result(copy.deepcopy(info), download=True)

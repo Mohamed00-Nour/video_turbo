@@ -80,6 +80,26 @@ class ReferenceTests(unittest.TestCase):
                 self.assertNotIn('--dangerously-skip-permissions',args)
                 self.assertEqual(json.loads(run.call_args.kwargs['input'])['message']['content'],'Analyze')
 
+    def test_google_empty_output_reports_missing_output_and_saves_tool_diagnostics(self):
+        events=[{'event':'step_update','step_update':{'state':'ERROR','tool_info':{'name':'run_command','error':'Permission denied'}}},
+                {'event':'result','result':{'status':'SUCCESS','response':'','conversation_id':'empty-result'}}]
+        result=type('Result',(),{'returncode':0,'stdout':'\n'.join(json.dumps(row) for row in events),'stderr':''})()
+        with tempfile.TemporaryDirectory() as folder,patch.object(ref.subprocess,'run',return_value=result):
+            with self.assertRaisesRegex(ValueError,'no structured output'):
+                ref.ask_antigravity({'cli_path':'agy.exe','model':ref.DEFAULT_MODEL},folder,'Analyze',ref.SCHEMA)
+            diagnostics=json.loads((Path(folder)/'reference/antigravity-response.json').read_text('utf-8'))
+            self.assertEqual(diagnostics['result']['conversation_id'],'empty-result')
+            self.assertEqual(diagnostics['tools'][0]['name'],'run_command')
+            self.assertTrue(diagnostics['tools'][0]['failed'])
+
+    def test_google_non_json_output_is_diagnosed_without_guessing_a_plan(self):
+        result=type('Result',(),{'returncode':0,'stdout':json.dumps({'event':'result','result':{'status':'SUCCESS','response':'I could not research this.'}}),'stderr':''})()
+        with tempfile.TemporaryDirectory() as folder,patch.object(ref.subprocess,'run',return_value=result):
+            with self.assertRaisesRegex(ValueError,'non-JSON output'):
+                ref.ask_antigravity({'cli_path':'agy.exe','model':ref.DEFAULT_MODEL},folder,'Analyze',ref.SCHEMA)
+            diagnostics=json.loads((Path(folder)/'reference/antigravity-response.json').read_text('utf-8'))
+            self.assertEqual(diagnostics['result']['response'],'I could not research this.')
+
     def test_auth_failure_is_actionable(self):
         result=type('Result',(),{'returncode':1,'stdout':'','stderr':'authentication required'})()
         with patch.object(ref.subprocess,'run',return_value=result):

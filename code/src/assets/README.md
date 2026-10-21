@@ -1,0 +1,1 @@
+windows10-desktop.jpg is the standard Windows 10 desktop wallpaper, copied unchanged from C:/Windows/Web/Wallpaper/Windows/img0.jpg on the Windows 10 development machine. Used as the background of the explicitly labeled Windows 10 instructional simulation.

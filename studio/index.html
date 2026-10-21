@@ -2,7 +2,7 @@
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark">
 <link rel="preload" href="/ui-fonts/source-sans-3-latin.woff2" as="font" type="font/woff2" crossorigin>
-<title>Video Turbo Studio</title><script src="/theme.js"></script><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/publishing.css"><link rel="stylesheet" href="/analytics.css"><link rel="stylesheet" href="/ai.css"><link rel="stylesheet" href="/reference.css"><link rel="stylesheet" href="/voice.css">
+<title>Video Turbo Studio</title><script src="/theme.js"></script><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/publishing.css"><link rel="stylesheet" href="/analytics.css"><link rel="stylesheet" href="/ai.css"><link rel="stylesheet" href="/reference.css"><link rel="stylesheet" href="/voice.css"><link rel="stylesheet" href="/pc-tips.css">
 </head><body>
 <div class="studio-shell">
 <div class="studio-topbar">
@@ -12,7 +12,7 @@
 </div>
 <aside class="sidebar">
 <div class="side-heading"><span>Your library</span><span id="project-count" class="count-badge">0</span></div>
-<button id="new-project" class="primary"><span aria-hidden="true">+</span> New video</button><button id="reference-new" class="outline">Create from Reference</button><button id="import-brief" class="outline">Import JSON brief</button><button id="import-project" class="quiet">Open existing folder</button>
+<button id="new-project" class="primary"><span aria-hidden="true">+</span> New video</button><button type="button" id="pc-new" class="outline">PC Tips &amp; Tricks</button><button id="reference-new" class="outline">Create from Reference</button><button id="import-brief" class="outline">Import JSON brief</button><button id="import-project" class="quiet">Open existing folder</button>
 <button type="button" id="voice-connection-open" class="quiet">ElevenLabs voice settings</button>
 <div class="side-label">PROJECTS</div><nav id="projects" aria-label="Video projects"></nav>
 <div class="sidebar-note"><span class="dot"></span> Made on your computer<p>Your projects, media and posting drafts stay in your local workspace.</p></div>
@@ -50,6 +50,26 @@
 <details class="reference-connection"><summary>Local AI connection</summary><p id="reference-connection-status" class="hint" role="status">Checking local CLI...</p><label class="field"><span id="reference-model-label">Gemini model</span><select id="reference-model" aria-describedby="reference-model-status"><option value="">Loading models...</option></select></label><div class="reference-model-tools"><p id="reference-model-status" class="hint" role="status" aria-live="polite">Loading models...</p><button type="button" id="reference-model-refresh" class="quiet small">Refresh models</button></div><label class="field"><span id="reference-cli-label">Antigravity CLI path (optional)</span><input id="reference-cli" spellcheck="false" placeholder="Automatically detected agy executable"></label><div class="reference-actions"><button type="button" class="outline small" id="reference-save-connection">Save connection</button><button type="button" class="outline small" id="reference-check-connection">Check connection</button></div><p class="hint">Uses the selected local CLI and its saved sign-in. For Codex, sign in with ChatGPT using codex login. For Antigravity, launch agy and sign in. No API key is needed here; model requests are hosted by the selected provider.</p></details>
 </section>
 
+<section class="panel pc-panel" id="pc-panel" aria-labelledby="pc-heading" hidden>
+<div class="eyebrow">PC TIPS &amp; TRICKS</div><div class="panel-heading"><h2 id="pc-heading">Your next episode</h2><span id="pc-theme" class="badge"></span></div>
+<p id="pc-status" role="status" aria-live="polite" aria-atomic="true"></p><p id="pc-note" class="hint"></p>
+<ol id="pc-progress" class="pc-progress" aria-label="Episode production"><li>Idea &amp; script</li><li>Setup</li><li>Tutorial visuals</li><li>Voice</li><li>Edit</li><li>Check</li><li>Export</li></ol>
+<p id="pc-error" class="brief-error" role="alert" hidden></p>
+<div class="pc-model-grid">
+<label class="field">This episode's visuals<select id="pc-episode-visual"><option value="illustrated">Windows 10 animated walkthrough</option><option value="real">Real Windows 10 screen recording</option></select></label>
+<label class="field" id="pc-episode-recording-field">Recording method<select id="pc-episode-recording"><option value="automatic">Use my dedicated Windows recording session</option><option value="upload">I'll upload a real screen recording</option></select></label>
+</div><p id="pc-episode-visual-note" class="hint"></p>
+<div class="pc-actions"><button type="button" id="pc-continue" class="primary">Continue production</button><button type="button" id="pc-copy-script" class="outline small">Copy script</button><button type="button" id="pc-download-script" class="quiet small">Download script</button><button type="button" id="pc-options" class="quiet small">Series settings</button></div>
+<div id="pc-recording-upload">
+<section id="pc-capture-guide" aria-labelledby="pc-capture-heading"><h3 id="pc-capture-heading">What to record, in order</h3>
+<p class="hint">Start with the visible problem for 3–5 seconds, then perform the solution steps and repeat the original action to show the result. Keep the cursor visible and pause briefly on menu names and results. Studio supplies the numbered opening and narration.</p>
+<p id="pc-capture-note" class="hint"></p><ol id="pc-capture-list" class="pc-shots"></ol>
+<button type="button" id="pc-copy-capture" class="outline small">Copy recording steps</button></section>
+<label class="upload pc-recording-upload"><span>Upload a real screen recording</span><small>MP4, MOV, MKV or WebM - replaces the episode recording</small><input id="pc-demo-input" type="file" accept=".mp4,.mov,.mkv,.webm,video/*"></label>
+<p class="hint">Upload one video with problem → solution → result in the listed order. When Windows paths differ, record each route on the matching Windows version and join the clips in this order. The complete recording fits the narration. For clearer text, use a 1280 x 720 test desktop with enlarged app text.</p>
+</div><details><summary>Shot list &amp; sources</summary><p id="pc-os" class="hint"></p><ol id="pc-shots" class="pc-shots"></ol><ul id="pc-sources"></ul></details>
+<div id="pc-package" class="pc-actions" hidden><a id="pc-cover" class="outline small" download="pc-tips-cover.jpg">Download cover</a><button type="button" id="pc-copy-post" class="quiet small">Copy post caption</button></div>
+</section>
 <section class="panel" id="voice-panel"><div class="panel-heading"><div><span class="step">01</span><h2>Voice & script</h2></div><span class="muted">The timing starts here</span></div><section id="ai-workflow" class="ai-workflow" aria-labelledby="ai-workflow-heading" hidden><div class="eyebrow">YOUR AI WORKFLOW</div><h3 id="ai-workflow-heading">Script first. Your voice next.</h3><p id="ai-workflow-series" class="hint" hidden></p><p id="ai-workflow-status" role="status" aria-live="polite"></p><p id="ai-workflow-note" class="hint"></p><div id="ai-workflow-steps" class="ai-workflow-steps" aria-label="Creation progress"><span data-ai-step="script">1 Script</span><span data-ai-step="approval">2 Approval</span><span data-ai-step="assets">3 Assets</span><span data-ai-step="voice">4 Voiceover</span><span data-ai-step="build">5 Video</span></div><div class="ai-workflow-actions"><button type="button" id="ai-copy-script" class="outline small">Copy script</button><button type="button" id="ai-download-script" class="quiet small">Download script</button><button type="button" id="ai-download-brief" class="quiet small" hidden>Download JSON brief</button><button type="button" id="ai-approve" class="primary">Approve script & prepare assets</button><button type="button" id="ai-prepare-assets" class="primary" hidden>Prepare assets</button><button type="button" id="ai-retry" class="outline" hidden>Retry AI step</button></div><p id="ai-workflow-error" class="brief-error" role="alert" hidden></p></section><div class="voice-source-row"><label class="field">Voiceover source<select id="voice-source" class="voice-source"><option value="upload">Upload a recording</option><option value="elevenlabs">Generate with ElevenLabs</option></select></label><button type="button" id="voice-setup" class="quiet small">ElevenLabs settings</button></div>
 <div id="voice-elevenlabs" class="voice-elevenlabs" hidden>
 <div class="voice-connection-row"><p id="voice-connection-status" class="hint" role="status" aria-live="polite">Connect your ElevenLabs account to load your cloned voices.</p><button type="button" id="voice-refresh" class="outline small">Refresh voices &amp; models</button></div>
@@ -71,6 +91,38 @@
 <div id="job-panel" hidden><div class="job-heading"><strong id="job-stage">Starting</strong><span id="job-percent">0%</span></div><progress id="progress" max="100" value="0"></progress><div class="job-footer"><span id="job-time"></span><button id="cancel" class="quiet small">Cancel job</button></div><details><summary>View job log</summary><pre id="logs"></pre></details></div></div></aside>
 </div></main></div>
 <div id="toast" role="status" hidden></div>
+<dialog id="pc-dialog" aria-labelledby="pc-create-heading"><form id="pc-form">
+<div class="eyebrow">A NEW PART. A NEW SETUP.</div><h2 id="pc-create-heading">PC Tips &amp; Tricks · Windows 10</h2>
+<div id="pc-creation-fields"><p id="pc-next" class="hint" role="status" aria-live="polite">Loading your series...</p>
+<label class="field">Video type<select id="pc-category" required aria-describedby="pc-category-note"><option value="auto">AI chooses</option></select></label>
+<p id="pc-category-note" class="hint">The AI picks a fresh tip for this episode.</p>
+<p class="hint">Windows 10 tutorials only. Choose a type and generate. AI finds the idea, researches it, writes the Egyptian Arabic script, creates the PC setup, shows the problem before the solution, adds narration and captions, and exports your Short or Reel.</p>
+<p id="pc-automation-note" class="hint" role="status" aria-live="polite"></p>
+</div>
+<label class="field">Tutorial visuals<select id="pc-visual"><option value="illustrated">Windows 10 animated walkthrough</option><option value="real">Real Windows 10 screen recording</option></select></label>
+<p id="pc-visual-note" class="hint"></p>
+<details id="pc-production"><summary>Production settings</summary>
+<p class="hint">Saved for your next episodes. Animated walkthroughs need no desktop capture. Real recordings use your dedicated Windows 10 session or an upload.</p>
+<label class="field" id="pc-name-field">Project name (optional)<input id="pc-name" maxlength="80" placeholder="Named automatically with the part number"></label>
+<label class="field">Narration<select id="pc-voice"><option value="elevenlabs">Generate with my ElevenLabs voice</option><option value="upload">I'll record the script</option></select></label>
+<label class="field" id="pc-recording-field">Recording method<select id="pc-recording"><option value="automatic">Automatic Windows 10 recording</option><option value="upload">I'll upload a real screen recording</option></select></label>
+<label class="check"><input type="checkbox" id="pc-auto" checked> Continue through production automatically</label>
+</details>
+<details id="pc-settings"><summary>Google first, fallback &amp; recording session</summary>
+<p id="pc-connection" class="hint" role="status" aria-live="polite"></p>
+<p class="hint">Google first: Gemini through your signed-in Antigravity account. Each result must pass validation and quality review; unavailable or unsuitable results fall back to ChatGPT. No separately billed AI API is used.</p>
+<div class="pc-model-grid"><label class="field">Google / Gemini model (first choice)<input id="pc-google-model" maxlength="100" spellcheck="false"></label><label class="field">Local Antigravity executable<input id="pc-google-cli-path" spellcheck="false" placeholder="Automatically detected"></label></div>
+<div class="pc-model-grid"><label class="field">ChatGPT model (fallback)<input id="pc-script-model" maxlength="100" spellcheck="false"></label><label class="field">Local Codex executable<input id="pc-cli-path" spellcheck="false" placeholder="Automatically detected"></label></div>
+<p class="hint">Setup images try Google's native image tool first, then ChatGPT. Flow clips currently use the separate import workflow; Flow is not connected for automatic generation. Tutorial scenes render locally with Windows 10 desktop, Settings and menu layouts. Your selected ElevenLabs voice or uploaded narration is kept.</p>
+<button id="pc-check-connection" type="button" class="ghost">Check Google-first connection</button>
+<label class="check"><input type="checkbox" id="pc-runner"> This Studio is running in a dedicated Windows 10 test session. Enable automatic desktop recording here.</label>
+<p class="hint">The runner operates this Windows desktop with the mouse and keyboard. Keep Studio in a separate test session with the required apps installed. Recording starts during episode production.</p>
+<button type="button" id="pc-save-settings" class="outline small">Save connection &amp; options</button>
+<p id="pc-settings-feedback" class="hint" role="status" aria-live="polite"></p>
+</details>
+<p id="pc-create-error" class="brief-error" role="alert" hidden></p>
+<div class="dialog-actions"><button type="button" id="pc-close" class="quiet">Cancel</button><button id="pc-create" class="primary">Generate video</button></div>
+</form></dialog>
 <dialog id="create-dialog" aria-labelledby="create-heading"><form id="create-form"><div class="eyebrow">FROM IDEA TO FINISHED VIDEO</div><h2 id="create-heading">Create a video</h2><label class="field">Workflow<select id="new-workflow"><option value="ai">AI script & assets</option><option value="manual">Manual layout</option></select></label><label class="field">Project name<input id="new-name" required placeholder="My next video" maxlength="80"></label><label class="field">Voiceover source<select id="new-voice-source" class="voice-source"><option value="upload">Upload a recording</option><option value="elevenlabs">Generate with ElevenLabs</option></select></label><p class="hint">ElevenLabs uses the default voice from Voice settings. You can change it in the project. For AI videos, generation begins after you approve the script and assets are ready.</p><div id="create-ai-fields">
 <section class="ai-series" aria-label="Episode series">
 <div class="ai-series-picker"><label class="field">Series<select id="ai-series" aria-describedby="ai-series-context"><option value="">Standalone video (no series)</option></select></label><button type="button" id="ai-series-new" class="outline">New series</button></div>
@@ -106,5 +158,5 @@
 <dialog id="voice-settings-dialog" aria-labelledby="voice-settings-heading"><form id="voice-settings-form"><div class="eyebrow">ELEVENLABS VOICEOVER</div><h2 id="voice-settings-heading">Your voice, ready for every video</h2><p class="hint">Connect once to use your cloned voice in manual layouts, AI scripts and series, imported JSON briefs, and Reference Styles.</p><label class="field">ElevenLabs API key<input id="voice-api-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="Paste once; blank keeps the saved key"></label><p class="hint">Saved on this computer, protected for your Windows account. Enable Text to Speech, Voices: Read, and Models: Read for this key.</p><a class="outline small" href="https://elevenlabs.io/app/developers/api-keys" target="_blank" rel="noopener noreferrer">Open ElevenLabs API keys</a><div class="voice-actions"><button type="button" id="voice-connect" class="outline">Save key &amp; load voices</button><button type="button" id="voice-settings-refresh" class="quiet">Refresh voices &amp; models</button></div><p id="voice-settings-status" class="hint" role="status" aria-live="polite"></p><div class="voice-select-grid"><label class="field">Default voice<select id="voice-default-id"><option value="">Connect ElevenLabs first</option></select></label><label class="field">Default speech model<select id="voice-default-model"><option value="">Connect ElevenLabs first</option></select></label></div><p class="hint">Create your voice clone in ElevenLabs first. If it does not appear here, refresh after cloning or training finishes. Saving settings does not generate speech.</p><p id="voice-settings-error" class="brief-error" role="alert" hidden></p><div class="dialog-actions"><button type="button" id="voice-settings-close" class="quiet">Close</button><button id="voice-settings-save" class="primary">Save default voice</button></div></form></dialog>
 <dialog id="publish-dialog" aria-labelledby="publish-heading"><div id="publish-panel"></div></dialog>
 <dialog id="analytics-dialog" aria-labelledby="analytics-heading"><div id="analytics-panel"></div></dialog>
-<script src="/app.js" defer></script><script src="/analytics.js" defer></script><script src="/publishing.js" defer></script><script src="/ai.js" defer></script><script src="/flow.js" defer></script><script src="/reference.js" defer></script><script src="/voice.js" defer></script>
+<script src="/app.js" defer></script><script src="/analytics.js" defer></script><script src="/publishing.js" defer></script><script src="/ai.js" defer></script><script src="/flow.js" defer></script><script src="/reference.js" defer></script><script src="/voice.js" defer></script><script src="/pc-tips.js" defer></script>
 </body></html>

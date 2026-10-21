@@ -102,6 +102,22 @@ class PipelineTests(unittest.TestCase):
             self.assertNotEqual(second['cacheKey'], first['cacheKey'])
             self.assertEqual(constructor.call_count, 2)
 
+    def test_pc_recognition_resets_short_windows_and_invalidates_long_prompt_cache(self):
+        word=types.SimpleNamespace(word='test',start=1.,end=1.3,probability=.9)
+        segment=types.SimpleNamespace(text='test',words=[word])
+        model=Mock();model.transcribe.return_value=(iter([segment]),None)
+        constructor=Mock(return_value=model)
+        with patch.dict(sys.modules,{'faster_whisper':types.SimpleNamespace(WhisperModel=constructor)}):
+            voice=voiceover_path(self.root);old=build.transcribe_voiceover(voice)
+            config=build.load_config();config['pc_tips']=True;write_json(self.root/'config.json',config)
+            model.transcribe.return_value=(iter([segment]),None)
+            current=build.transcribe_voiceover(voice)
+        self.assertNotEqual(old['cacheKey'],current['cacheKey'])
+        options=model.transcribe.call_args.kwargs
+        self.assertEqual(options['chunk_length'],20)
+        self.assertIsNone(options['initial_prompt']);self.assertIsNone(options['hotwords'])
+        self.assertFalse(options['vad_filter'])
+
     def test_sync_skips_unchanged_files_and_does_not_copy_raw_footage(self):
         raw = self.root / 'games/01_game/raw_gameplay.mp4'
         raw.write_bytes(b'unused full gameplay')

@@ -100,6 +100,17 @@ class DirectAudioAlignmentTests(unittest.TestCase):
         self.assertEqual(chunks, [(0, 3, 0., 27.09)])
         self.assertEqual(len(groups), 3)
 
+    def test_long_audio_keeps_opening_when_transcription_misses_first_game(self):
+        tokens=[f"word{i}" for i in range(90)]
+        # The reported 36.96s import estimated the first script word at 2.96s
+        # after ASR omitted the opening. That estimate must not crop real audio.
+        guide=[{"start":2.96+i*.36,"end":3.26+i*.36} for i in range(90)]
+        chunks,groups=build._alignment_chunks(tokens,guide,36.96,lambda word:[1]*3)
+        self.assertEqual(chunks[0][2],0.)
+        self.assertEqual(chunks[0][0],0)
+        self.assertEqual(chunks[-1][1],len(tokens))
+        self.assertTrue(all(0<=lo<hi<=36.96 and hi-lo<=30 for _,_,lo,hi in chunks))
+
     def test_long_alignment_stays_within_audio_and_token_context(self):
         tokens = [f"word{i}" for i in range(150)]
         guide = [{"start": i * .5, "end": i * .5 + .4} for i in range(150)]

@@ -31,6 +31,7 @@ from ai_series import SeriesLibrary
 import reference_styles
 import flow_workflow
 import voice_generation
+import pc_tips
 
 ENGINE = Path(__file__).resolve().parent
 WEB = ENGINE / 'studio'
@@ -63,7 +64,9 @@ class Studio:
                 if saved_job.get('project') in self.registry:
                     project = self.project(saved_job['project'])
                     action = saved_job.get('next_action', saved_job.get('action', ''))
-                    if action.startswith('reference_'):
+                    if action.startswith('pc_'):
+                        path = project / 'pc_tips.json'
+                    elif action.startswith('reference_'):
                         path = project / 'reference_style.json'
                     elif not saved_job.get('action', '').startswith('voice_'):
                         path = project / 'ai_workflow.json'
@@ -169,6 +172,52 @@ class Studio:
         write_json(path / 'studio.json', editor)
         return self.register(path)
 
+    def create_pc_tips(self, name='', idea='', recording_mode=None, auto_produce=None, voice_source=None, category='auto'):
+        self.idle()
+        options = pc_tips.settings(self.data)
+        selected_type = pc_tips.category(category)
+        if not isinstance(name, str) or len(name.strip()) > 80: raise ValueError('Keep the project name below 80 characters.')
+        if not isinstance(idea, str) or len(idea.strip()) > 10000: raise ValueError('Keep the video idea below 10,000 characters.')
+        name = name.strip() or f'PC Tips & Tricks - Part {pc_tips.next_part(self.data):02}'
+        idea = idea.strip()
+        if recording_mode is None: recording_mode = options['recording_mode']
+        if auto_produce is None: auto_produce = options['auto_produce']
+        if voice_source is None: voice_source = options['voice_source']
+        if recording_mode not in pc_tips.RECORDING_MODES: raise ValueError('Choose an animated walkthrough or a real Windows recording.')
+        if not isinstance(auto_produce, bool): raise ValueError('Choose automatic production or script review.')
+        if voice_source not in ('upload', 'elevenlabs'): raise ValueError('Choose a narration source.')
+        pc_tips.pc_tips_ai.require_connection(self.data)
+        identifier = self.create(name, 'blank')
+        path = self.project(identifier)
+        part = pc_tips.reserve(self.data, identifier, idea, selected_type['id'])
+        selected = {**voice_generation.DEFAULTS, **self.voice.snapshot()['defaults'], 'source': voice_source}
+        write_json(path / 'voiceover.json', selected)
+        options = pc_tips.settings(self.data)
+        pc_tips.save_state(path, {'project': identifier, 'part': part, 'idea': idea, 'idea_source': 'manual' if idea else 'automatic',
+            'category': selected_type['id'], 'theme': pc_tips.theme(part),
+            'recording_mode': recording_mode, 'auto_produce': auto_produce, 'status': 'writing_script',
+            'script_model': options['script_model'], 'ai_connection': 'google-first-subscriptions', 'error': ''})
+        return self.start_pc_tips(identifier)
+
+    def start_pc_tips(self, identifier, recording_mode=None, add_problem=False):
+        with self.lock:
+            self.idle()
+            path = self.project(identifier)
+            saved = pc_tips.state(path)
+            if not saved: raise ValueError('Create a PC Tips & Tricks episode first.')
+            if saved.get('stale'): raise ValueError('Save the current script before continuing production.')
+            pc_tips.pc_tips_ai.require_connection(self.data)
+            options = pc_tips.settings(self.data)
+            if recording_mode is not None: pc_tips.change_mode(saved, recording_mode)
+            saved.update(script_model=options['script_model'], ai_connection='google-first-subscriptions')
+            saved.pop('image_model', None)
+            if not isinstance(add_problem, bool): raise ValueError('Choose whether to add the problem opening.')
+            drafting = not saved.get('plan')
+            pc_tips.save_state(path, saved, 'writing_script' if drafting else 'preparing', error='')
+            job = self._ai_job(identifier, 'pc_draft' if drafting else 'pc_problem' if add_problem and not saved['plan'].get('problem') else 'pc_produce', 'Writing PC tutorial' if drafting else 'Preparing PC tutorial')
+            threading.Thread(target=self.run, args=(job, path, read_cache(path / 'config.json'), 0), daemon=True).start()
+            return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
+
     def create_reference(self, name, script, instructions='', provider=None, workflow='reference', idea=''):
         self.idle()
         if workflow not in ('reference', 'flow'): raise ValueError('Choose a supported creation path.')
@@ -234,6 +283,7 @@ class Studio:
         with self.lock:
             self.idle()
             path = self.project(identifier)
+            if build and pc_tips.state(path): return self.start_pc_tips(identifier)
             selected = voice_generation.options(voice_generation.project_state(path))
             if selected['source'] != 'elevenlabs': raise ValueError('Choose ElevenLabs as your voiceover source first.')
             if not self.voice.snapshot()['configured']: raise ValueError('Connect ElevenLabs in Voice settings first.')
@@ -336,6 +386,7 @@ class Studio:
         path = self.project(identifier)
         editor = read_cache(path / 'studio.json')
         config = read_cache(path / 'config.json')
+        tutorial = pc_tips.state(path)
         if not editor:
             sources = {}
             if (path / 'games.txt').exists():
@@ -355,9 +406,9 @@ class Studio:
         return {'id': identifier, 'path': str(path), 'editor': editor, 'media': self.media(path),
                 'voiceover': voice, 'music': (path / 'music.mp3').is_file(),
                 'background': (path / 'gta_background.mp4').is_file(),
-                'final': (path / 'output/final.mp4').is_file(), 'preview': (path / 'output/studio_preview.png').is_file(),
+                'final': (path / 'output/final.mp4').is_file() and (not tutorial or tutorial.get('status') == 'complete' and not tutorial.get('stale') and not tutorial.get('voice_stale') and not tutorial.get('render_stale')), 'preview': (path / 'output/studio_preview.png').is_file(),
                 'ai_workflow': self.workflow(identifier), 'reference_style': self.reference_state(identifier),
-                'voice_settings': voice_generation.project_state(path)}
+                'voice_settings': voice_generation.project_state(path), 'pc_tips': tutorial}
 
     def save(self, identifier, editor, *, job_id=None):
         if job_id is None:
@@ -428,6 +479,8 @@ class Studio:
                 spec['logo_file'] = ('logo' + Path(game['logo']).suffix.lower()) if game.get('logo') else ''
                 config['games'].append(spec)
             (path / 'games.txt').write_text('\n'.join(f"{g['folder']} | {g['url']}" for g in games if g.get('url')), encoding='utf-8')
+        tutorial = pc_tips.state(path)
+        if tutorial: pc_tips.sync_script(path, tutorial, editor.get('script', ''))
         write_json(path / 'config.json', config)
         write_json(path / 'studio.json', editor)
         (path / 'script.txt').write_text(editor.get('script', ''), encoding='utf-8')
@@ -581,6 +634,17 @@ class Studio:
 
     def maybe_auto_build(self, identifier):
         with self.lock:
+            tutorial = pc_tips.state(self.project(identifier))
+            if tutorial:
+                if tutorial.get('status') not in ('awaiting_voice', 'awaiting_recording', 'awaiting_runner'): return
+                if self.publisher.running or self.job and self.job.get('status') in ('running','cancelling'): return
+                if not tutorial.get('plan') or tutorial.get('stale'): return
+                if tutorial.get('status') == 'awaiting_voice':
+                    try: voiceover_path(self.project(identifier))
+                    except FileNotFoundError: return
+                elif not tutorial.get('recordings'): return
+                self.start_pc_tips(identifier)
+                return
             workflow = self.workflow(identifier)
             if workflow.get('status') != 'assets_ready' or not workflow.get('auto_build'): return
             if self.publisher.running or self.job and self.job.get('status') in ('running','cancelling'): return
@@ -597,6 +661,8 @@ class Studio:
     def start(self, identifier, action, at=0):
         with self.lock:
             self.idle()
+            if action == 'build' and pc_tips.state(self.project(identifier)):
+                return self.start_pc_tips(identifier)['job']
             if action not in ('build', 'preview'):
                 raise ValueError('Choose build or preview.')
             path = self.project(identifier)
@@ -636,6 +702,11 @@ class Studio:
     def run(self, job, path, config, at):
         commands = []
         action = job.get('next_action', job['action'])
+        if action.startswith('pc_'):
+            command = [sys.executable, '-u', str(ENGINE / 'pc_tips.py'), '--project', str(path), '--data', str(self.data)]
+            if action == 'pc_draft': command.append('--draft')
+            if action == 'pc_problem': command.append('--add-problem')
+            commands.append(command)
         if job['action'].startswith('voice_'):
             command = [sys.executable, '-u', str(ENGINE / 'voice_generation.py'), '--project', str(path), '--data', str(self.data)]
             if job.get('force_voice'): command.append('--force')
@@ -649,7 +720,7 @@ class Studio:
         command = [sys.executable, '-u', str(ENGINE / 'build_video.py'), '--project', str(path), '--no-preview']
         if action == 'preview':
             command += ['--preview-only', '--preview-at', str(at)]
-        if action and action not in ('ai_prepare', 'reference_plan'): commands.append(command)
+        if action and action not in ('ai_prepare', 'reference_plan') and not action.startswith('pc_'): commands.append(command)
         try:
             for command in commands:
                 with self.lock:
@@ -669,6 +740,7 @@ class Studio:
                         job['logs'] = job['logs'][-600:]
                         if 'Transcribing' in line: job['stage'] = 'Transcribing voiceover'
                         if 'Aligning' in line: job['stage'] = 'Aligning captions'
+                        if '[PC TIPS]' in line: job['stage'] = line.split('[PC TIPS]', 1)[1].strip()
                         if '[VOICE]' in line: job['stage'] = line.split('[VOICE]', 1)[1].strip()
                         if '[REFERENCE]' in line: job['stage'] = line.split('[REFERENCE]', 1)[1].strip()
                         if '[PREPARE]' in line: job['stage'] = 'Preparing footage'
@@ -699,6 +771,13 @@ class Studio:
             with self.lock:
                 self.process = None
                 job['finished'] = time.time()
+                if action.startswith('pc_'):
+                    tutorial = pc_tips.state(path)
+                    if job['status'] != 'complete':
+                        pc_tips.save_state(path, tutorial, job['status'], error=tutorial.get('error') or job.get('error', ''))
+                    elif tutorial.get('status') != 'complete':
+                        job['stage'] = {'awaiting_review': 'Script ready for review', 'awaiting_voice': 'Waiting for your voiceover',
+                            'awaiting_recording': 'Waiting for a screen recording', 'awaiting_runner': 'Waiting for the recording runner'}.get(tutorial.get('status'), 'Episode saved')
                 reference = read_cache(path / 'reference_style.json')
                 if reference and action:
                     if job['status'] == 'complete':
@@ -781,12 +860,18 @@ class Handler(BaseHTTPRequestHandler):
             if host not in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'):
                 self.json_response({'error': 'Use the localhost address.'}, 403); return
             if parsed.path == '/api/health':
-                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series', 'parallel-publishing', 'analytics', 'reference-styles', 'reference-codex', 'reference-models', 'elevenlabs-voice', 'google-flow-handoff', 'flow-portable-prompts']})
+                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series', 'parallel-publishing', 'analytics', 'reference-styles', 'reference-codex', 'reference-models', 'elevenlabs-voice', 'google-flow-handoff', 'flow-portable-prompts', 'pc-tips', 'pc-chatgpt-sign-in', 'pc-auto-ideas', 'pc-visual-modes', 'pc-problem-first', 'pc-google-first']})
             elif parsed.path == '/api/state':
                 with self.studio.lock:
                     self.json_response({'token': self.studio.token, 'projects': self.studio.list_projects(),
                                         'presets': list(self.studio.presets), 'job': self.studio.job,
                                         'publishing_job': self.studio.publisher.active_job()})
+            elif parsed.path == '/api/pc-tips/settings':
+                with self.studio.lock:
+                    part = pc_tips.next_part(self.studio.data)
+                    voice = self.studio.voice.snapshot()
+                    self.json_response({**pc_tips.settings(self.studio.data), 'next_part': part, 'next_theme': pc_tips.theme(part),
+                        'voice_ready': voice['configured'] and all(voice['defaults'].get(key) for key in ('voice_id', 'model_id'))})
             elif parsed.path == '/api/voice/settings':
                 with self.studio.lock: self.json_response(self.studio.voice.snapshot())
             elif parsed.path == '/api/voice/catalog':
@@ -873,7 +958,7 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == '/api/upload':
                 with self.studio.lock:
                     role = query.get('role', ['media'])[0]
-                    preparation = self.studio.job and self.studio.job.get('action') == 'ai_prepare' and self.studio.job.get('status') == 'running' and self.studio.job.get('project') == query['id'][0]
+                    preparation = self.studio.job and (self.studio.job.get('action') == 'ai_prepare' or self.studio.job.get('action', '').startswith('pc_')) and self.studio.job.get('status') == 'running' and self.studio.job.get('project') == query['id'][0]
                     if role != 'voice' or not preparation: self.studio.idle()
                     elif self.studio.publisher.running: raise ValueError('Wait for the publishing upload to finish.')
                     project = self.studio.project(query['id'][0])
@@ -898,6 +983,10 @@ class Handler(BaseHTTPRequestHandler):
                         scene = next((row for row in flow_workflow.scene_rows(plan) if row['id'] == query.get('scene', [''])[0]), None)
                         if not scene: raise ValueError('Choose a scene in the current Flow storyboard.')
                         target = project / 'media/flow' / (scene['id'] + '-' + uuid.uuid4().hex[:12] + ext)
+                    elif role == 'pc_demo':
+                        if ext not in sections.VIDEO_EXTS: raise ValueError('Choose a video screen recording.')
+                        if not pc_tips.state(project): raise ValueError('Create a PC tutorial first.')
+                        target = project / 'media/pc-tips' / ('uploaded-' + uuid.uuid4().hex[:12] + ext)
                     elif role == 'media':
                         if ext not in sections.VIDEO_EXTS | sections.IMAGE_EXTS: raise ValueError('Choose a clip or screenshot.')
                         target = project / 'media' / (uuid.uuid4().hex[:12] + '-' + re.sub(r'[^\w .()-]', '', Path(name).stem)[:60] + ext)
@@ -913,12 +1002,18 @@ class Handler(BaseHTTPRequestHandler):
                                 if not data: raise ValueError('Upload was interrupted.')
                                 out.write(data); remaining -= len(data)
                         if role == 'flow_clip': flow_workflow.clip_info(pending, scene['duration_seconds'])
+                        if role == 'pc_demo': pc_tips.video_info(pending)
                         pending.replace(target)
                         if role == 'voice':
                             for suffix in ('.mp3', '.wav', '.m4a', '.flac', '.aac', '.ogg'):
                                 old = project / ('voiceover' + suffix)
                                 if old != target: old.unlink(missing_ok=True)
                     finally: pending.unlink(missing_ok=True)
+                    if role == 'pc_demo':
+                        tutorial = pc_tips.state(project)
+                        pc_tips.save_state(project, tutorial, ('awaiting_review' if tutorial.get('status') == 'awaiting_review' else 'awaiting_recording') if tutorial.get('plan') else tutorial.get('status'), recordings=[{'file': target.relative_to(project).as_posix()}],
+                                           recording_mode='upload', recording_report=[], quality_check={}, visual_source='recorded', visual_note='Uploaded real screen recording.')
+                        if tutorial.get('status') != 'awaiting_review': self.studio.maybe_auto_build(query['id'][0])
                     if role == 'flow_clip':
                         flow_workflow.assign_clip(project, scene['id'], target.relative_to(project).as_posix(), plan_hash=reference['plan_hash'])
                     if role == 'reference':
@@ -928,6 +1023,10 @@ class Handler(BaseHTTPRequestHandler):
                     if role == 'voice':
                         voice_settings = read_cache(project / 'voiceover.json'); voice_settings['source'] = 'upload'
                         write_json(project / 'voiceover.json', voice_settings)
+                        tutorial = pc_tips.state(project)
+                        if tutorial: pc_tips.save_state(project, tutorial, needs_voice_upload=False)
+                        if tutorial.get('plan') and tutorial.get('status') == 'complete':
+                            pc_tips.save_state(project, tutorial, 'awaiting_voice')
                         self.studio.maybe_auto_build(query['id'][0])
                     self.json_response({'path': target.relative_to(project).as_posix(), 'project': self.studio.load(query['id'][0])})
                 return
@@ -936,6 +1035,15 @@ class Handler(BaseHTTPRequestHandler):
             with self.studio.lock:
                 if parsed.path == '/api/analytics/refresh':
                     result = self.studio.analytics.refresh()
+                elif parsed.path == '/api/pc-tips/create':
+                    result = self.studio.create_pc_tips(data.get('name', ''), data.get('idea', ''), data.get('recording_mode'),
+                                                        data.get('auto_produce'), data.get('voice_source'), data.get('category', 'auto'))
+                elif parsed.path == '/api/pc-tips/start':
+                    result = self.studio.start_pc_tips(data['id'], data.get('recording_mode'), data.get('add_problem', False))
+                elif parsed.path == '/api/pc-tips/check':
+                    self.studio.idle(); result = pc_tips.pc_tips_ai.check_connection(self.studio.data)
+                elif parsed.path == '/api/pc-tips/settings':
+                    self.studio.idle(); result = pc_tips.configure(self.studio.data, data)
                 elif parsed.path == '/api/create':
                     identifier = self.studio.create(data['name'], data.get('preset', 'blank')); result = self.studio.load(identifier)
                 elif parsed.path == '/api/voice/settings':
@@ -1046,7 +1154,7 @@ class StudioServer(ThreadingHTTPServer):
         super().server_bind()
 
 
-def running_studio(url, require_series=False, require_parallel=False, require_analytics=False, require_reference=False, require_codex=False, require_models=False, require_voice=False, require_flow=False):
+def running_studio(url, require_series=False, require_parallel=False, require_analytics=False, require_reference=False, require_codex=False, require_models=False, require_voice=False, require_flow=False, require_pc=False):
     """Identify this studio without changing its projects or interrupting a job."""
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -1054,6 +1162,7 @@ def running_studio(url, require_series=False, require_parallel=False, require_an
             data = json.loads(response.read(8192))
         return (isinstance(data, dict) and data.get('app') == 'video-turbo-studio'
                 and isinstance(data.get('engine'), str) and Path(data['engine']).resolve() == ENGINE
+                and (not require_pc or all(flag in data.get('features', []) for flag in ('pc-tips', 'pc-chatgpt-sign-in', 'pc-auto-ideas', 'pc-visual-modes', 'pc-problem-first', 'pc-google-first')))
                 and (not require_series or 'ai-series' in data.get('features', []))
                 and (not require_parallel or 'parallel-publishing' in data.get('features', []))
                 and (not require_analytics or 'analytics' in data.get('features', []))
@@ -1091,7 +1200,7 @@ def main():
             server = StudioServer(('127.0.0.1', port), Handler)
             break
         except OSError as error:
-            if running_studio(url, require_series=True, require_parallel=True, require_analytics=True, require_reference=True, require_codex=True, require_models=True, require_voice=True, require_flow=True):
+            if running_studio(url, require_series=True, require_parallel=True, require_analytics=True, require_reference=True, require_codex=True, require_models=True, require_voice=True, require_flow=True, require_pc=True):
                 print(f'Video Turbo Studio is already running: {url}', flush=True)
                 if not args.no_browser: webbrowser.open(url)
                 return 0
