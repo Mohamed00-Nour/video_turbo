@@ -70,7 +70,7 @@
   $('reference-build').hidden=ref.workflow==='flow' || recreating;
   $('reference-plan').textContent=ref.workflow==='flow' ? (!project.editor.script.trim()?'Analyze reference & draft script':'Prepare Flow storyboard') : recreating ? (ref.status==='script_review'?'Draft the script again':'Analyze source & draft script') : 'Analyze & plan scenes';
   $('reference-status').textContent=active ? state.job.stage : ref.workflow!=='flow' && ref.stale && ref.analysis ? 'Your inputs changed. Analyze again to adapt the scenes to the current reference and recording.' : (ref.workflow==='flow' ? (ref.stale && ref.flow_plan ? 'Your inputs changed. Prepare the Flow storyboard again before importing or building.' : ({awaiting_inputs:'Add your reference, spoken script and voiceover, then prepare your Flow storyboard.',script_review:'Review and approve the script draft below, then add your voiceover.',awaiting_clips:'Storyboard ready. Generate your scenes in Flow and import each clip below.',ready:'All Flow clips are imported. Review the scenes, then build your final video.',complete:'Your Flow video is ready.',failed:'Flow preparation needs attention. Check the message and retry.',render_failed:'Your Flow clips are saved. Check the build log and retry.',cancelled:'Cancelled. Your saved storyboard and clips are kept.'}[ref.status] || 'Prepare your Flow storyboard when your inputs are ready.')) : ({awaiting_inputs:'Reference project ready. Check your files below, then analyze the style.',ready:'Style analyzed and scenes prepared. Edit the scenes below or build your video.',complete:'Your reference-style video is ready.',render_failed:'The scene plan is ready. Check the build log and retry Build video.',failed:'Analysis or building needs attention. Your files are saved; check the message and retry.',cancelled:'Cancelled. Your files are saved; analyze again when ready.',interrupted:'Analysis was interrupted. Your files are saved; retry analysis.'}[ref.status] || 'Ready to analyze your reference.'));
-  if(recreating && !active)$('reference-status').textContent=ref.status==='script_review'?'Review and approve your new script below, then add your voiceover.':ref.status==='failed'?'Drafting needs attention. Check the message and retry.':'Add your source video, then draft your new script from its idea.';
+  if(recreating && !active)$('reference-status').textContent=ref.status==='script_review'?'Review and approve your new script below, then add your voiceover.':ref.status==='failed'?'Drafting needs attention. Check the message below, then click Analyze source & draft script to retry.':ref.status==='interrupted'?'Drafting was interrupted. Click Analyze source & draft script to retry.':window.VideoTurboRecreate?.hasSource(project)?'Your source video is ready. Click Analyze source & draft script to write your new script.':'Add your source video, then draft your new script from its idea.';
   window.VideoTurboRecreate?.update(project);
   message('reference-project-error',ref.error || '');
   const library=ref.library_styles || [];
@@ -177,6 +177,15 @@
   const project=await app.api('/api/reference/create',{provider,voice_source:$('reference-voice-source').value,name:$('reference-name').value,script:drafting?'':$('reference-script').value,...flow,instructions:$('reference-instructions').value,styles:library.styles,style_mix:library.mix,...(recreating?{recreate:recreating.options}:{})});
   app.install(project);$('reference-dialog').close();await app.refreshState();
   for(const [role,file] of files){app.toast('Uploading '+file.name+'...');await upload(file,role);}
+  if(recreating){
+   // Every input for the draft is ready, so start it now; the script still waits for approval.
+   try{
+    const result=await app.api('/api/reference/start',{id:project.id,build:false,provider});
+    app.getState().job=result.job;app.install(result.project);app.showJob();await connection();
+    app.toast('Project created. Drafting your new script from the source video.');
+   }catch(error){app.toast('Project created, but drafting could not start: '+error.message+' Click Analyze source & draft script to retry.',true);}
+   return;
+  }
   await connection();app.toast(flow.workflow==='flow'?'Flow project ready. Analyze the reference to prepare your script or storyboard.':recreating?'Project ready. Click Analyze source & draft script.':library.styles.length?'Project ready. Click Analyze & plan scenes to apply your saved styles.':'Reference project ready. Analyze the style to prepare your new scenes.');
  },'reference-create-error');};
  $('reference-create-provider').onchange=()=>{

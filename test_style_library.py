@@ -373,3 +373,45 @@ class StudioLibraryTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class NormalizeTests(unittest.TestCase):
+    def test_out_of_range_measurements_are_adjusted_not_rejected(self):
+        analysis = profile()['analysis']
+        analysis.update(caption_y=.95, shadow_opacity=35, grid_opacity='12%', float_amplitude=80, accent='#F0A', ink='1D1A16')
+        notes = ref.normalize_analysis(analysis)
+        self.assertEqual(analysis['caption_y'], .9); self.assertEqual(analysis['shadow_opacity'], .35)
+        self.assertEqual(analysis['grid_opacity'], .12); self.assertEqual(analysis['float_amplitude'], 45)
+        self.assertEqual(analysis['accent'], '#FF00AA'); self.assertEqual(analysis['ink'], '#1D1A16')
+        self.assertTrue(any(note.startswith('caption height .95') or note.startswith('caption height 0.95') for note in notes))
+        ref.validate_analysis(analysis)
+        self.assertEqual(ref.normalize_analysis(profile()['analysis']), [])
+
+    def test_unfixable_values_still_fail_with_plain_words(self):
+        analysis = profile()['analysis']; analysis['entrance'] = 'explode'
+        self.assertEqual(ref.normalize_analysis(analysis), [])
+        with self.assertRaises(ValueError) as caught: ref.validate_analysis(analysis)
+        self.assertNotIn('_', ref.describe_style_error(caught.exception))
+        self.assertEqual(ref.describe_style_error(ValueError('Invalid caption_y in the reference plan.')), 'Invalid caption height from the AI.')
+
+    def test_style_analysis_survives_a_high_caption_height(self):
+        with tempfile.TemporaryDirectory() as folder:
+            data = Path(folder); style_id = lib.create(data, 'Tall captions', 'claude')['id']
+            path = lib.folder(data, style_id); (path / 'source.mp4').write_bytes(b'video')
+            value = read_cache(path / 'style.json'); value['source_file'] = 'source.mp4'; write_json(path / 'style.json', value)
+            answer = profile(caption_y=.93)
+            connections = {'provider': 'claude', 'providers': {'claude': {'cli_path': 'claude.exe', 'model': '', 'installed': True}}}
+            def sample(project, reference):
+                (Path(project) / 'reference/frames').mkdir(parents=True, exist_ok=True)
+                return {'sheets': [], 'duration_seconds': 4}
+            with patch.object(ref, 'sample_reference', side_effect=sample), patch.object(ref, 'settings', return_value=connections), \
+                 patch.object(ref, 'ask_provider', return_value=(answer, {})):
+                lib.analyze(data, style_id)
+            row = lib.list_styles(data)[0]
+            self.assertEqual(row['status'], 'ready'); self.assertEqual(row['profile']['analysis']['caption_y'], .9)
+            self.assertTrue((path / 'reference/last-answer.json').is_file())
+            bad = profile(); bad['analysis']['heading_font'] = 'comic'
+            with patch.object(ref, 'sample_reference', side_effect=sample), patch.object(ref, 'settings', return_value=connections), \
+                 patch.object(ref, 'ask_provider', return_value=(bad, {})):
+                with self.assertRaisesRegex(ValueError, 'cannot use: Unsupported heading font from the AI'): lib.analyze(data, style_id)
+            self.assertIn('Analyze again', lib.list_styles(data)[0]['error'])

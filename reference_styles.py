@@ -515,6 +515,56 @@ def number(value, low, high, name):
         raise ValueError('Invalid ' + name + ' in the reference plan.')
     return value
 
+STYLE_LIMITS = {'float_amplitude': (0, 45), 'float_period': (30, 300), 'shadow_blur': (0, 100), 'shadow_opacity': (0, .6),
+                'shadow_y': (0, 100), 'card_radius': (0, 100), 'caption_y': (.6, .9), 'ribbon_width': (.5, 100), 'grid_opacity': (0, .25)}
+STYLE_LABELS = {'float_amplitude': 'floating distance', 'float_period': 'floating cycle', 'shadow_blur': 'shadow softness',
+                'shadow_opacity': 'shadow strength', 'shadow_y': 'shadow offset', 'card_radius': 'corner roundness',
+                'caption_y': 'caption height', 'ribbon_width': 'line thickness', 'grid_opacity': 'grid visibility',
+                'background': 'background color', 'background_end': 'gradient end color', 'ink': 'text color', 'accent': 'accent color',
+                'muted': 'secondary text color', 'contrast_background': 'contrast background color', 'heading_font': 'heading font',
+                'entrance': 'entrance', 'transition': 'transition', 'caption_style': 'caption style'}
+SHARES = ('caption_y', 'shadow_opacity', 'grid_opacity')  # Fractions an AI may report as percentages.
+
+
+def normalize_analysis(style):
+    """Bring measured style numbers and colors into the renderer's supported ranges.
+
+    Returns plain-language notes for every value that changed, so the job log explains it.
+    """
+    notes = []
+    if not isinstance(style, dict): return notes
+    for key, (low, high) in STYLE_LIMITS.items():
+        value = style.get(key)
+        if isinstance(value, str):
+            try: value = float(value.strip().rstrip('%'))
+            except ValueError: continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value): continue
+        original = style[key]
+        if key in SHARES and 1 < value <= 100: value = value / 100
+        value = min(high, max(low, value))
+        if value != original:
+            style[key] = round(value, 4)
+            notes.append(f'{STYLE_LABELS[key]} {original} to {style[key]}')
+    for key in ('background', 'background_end', 'ink', 'accent', 'muted', 'contrast_background'):
+        value = style.get(key)
+        if isinstance(value, str):
+            match = re.fullmatch(r'#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})', value.strip())
+            if match:
+                digits = match[1] if len(match[1]) == 6 else ''.join(c * 2 for c in match[1])
+                if '#' + digits != value:
+                    style[key] = '#' + digits
+                    notes.append(f'{STYLE_LABELS[key]} {value} to {style[key]}')
+    return notes
+
+
+def describe_style_error(error):
+    """Turn a validation message that names an internal field into plain language."""
+    text = str(error)
+    for key, label in sorted(STYLE_LABELS.items(), key=lambda row: -len(row[0])):
+        text = text.replace(key, label)
+    return text.replace('in the reference plan', 'from the AI').replace('in style analysis', 'from the AI')
+
+
 def validate_analysis(style):
     """Check a style profile: palette, typography, motion, transitions and caption settings."""
     if not isinstance(style, dict): raise ValueError('The style analysis is missing.')
@@ -759,7 +809,10 @@ def run_project(project, data):
         plan,metadata=ask_provider(connection,project,prompt,SCHEMA)
         # Saved-style choices are applied after the AI answers, so it cannot override them.
         if library: style_library.apply_mix(plan,state['library_styles'],state.get('style_mix',{}))
-        validate_plan(plan,duration,{row['path'] for row in inventory})
+        for note in normalize_analysis(plan.get('analysis') if isinstance(plan,dict) else None):
+            log('Adjusted to the supported range: '+note)
+        try: validate_plan(plan,duration,{row['path'] for row in inventory})
+        except ValueError as error: raise ValueError(describe_style_error(error)+' Analyze again, or choose another model.') from None
         plan['analysis']['renderer_version']=3
         write_json(project/'reference/plan.json',plan)
         log('Preparing assets selected by '+PROVIDER_NAMES[provider])

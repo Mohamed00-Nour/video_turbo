@@ -339,7 +339,13 @@ def analyze(data, style_id):
             connection['required_images'] = [str(path / name) for name in sheets]
         log(ref.PROVIDER_NAMES[provider] + ' is breaking down the style (' + (connection.get('model') or 'configured default') + ')')
         answer, metadata = ref.ask_provider(connection, path, prompt, STYLE_SCHEMA)
-        profile = validate_profile(answer)
+        write_json(path / 'reference/last-answer.json', answer)  # Kept for troubleshooting a rejected breakdown.
+        for note in ref.normalize_analysis(answer.get('analysis') if isinstance(answer, dict) else None):
+            log('Adjusted to the supported range: ' + note)
+        try: profile = validate_profile(answer)
+        except ValueError as error:
+            raise ValueError('The AI breakdown had a value Video Turbo cannot use: ' + ref.describe_style_error(error) +
+                             ' Analyze again, or choose another model.') from None
         frames = sorted((path / 'reference/frames').glob('frame-*.jpg'))
         if frames: shutil.copyfile(frames[len(frames) // 3], path / 'thumb.jpg')
         value.update(status='ready', profile=profile, provider=provider, model=connection.get('model', ''),
