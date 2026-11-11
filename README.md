@@ -824,6 +824,34 @@ later edits to those styles; deleting a library style does not break a project.
 Styles live in `output/reference_styles/library/` and are excluded from Git;
 deleted styles are moved to `output/reference_styles/deleted/`.
 
+### Recreate a video's idea with your style and voice
+
+In **Create from Reference** → **Video Turbo animation**, pick one or two saved
+styles, then set **Start with** to **Recreate a video's idea**. Upload the source
+video or paste its YouTube link (up to 10 minutes), choose the script language
+(default Egyptian Arabic) and optionally a target length in seconds; empty keeps
+the source's length. Then click **Create project** and **Analyze source & draft script**.
+
+1. Studio downloads a YouTube source at up to 480p with audio, samples its frames
+   and transcribes its speech with the installed Whisper model, in its own language.
+2. The selected AI writes a **Source idea** breakdown (hook, main points in order with
+   what the source shows for each, and ending) and a new script in your language, in
+   its own words. It is told not to copy sentences or invent facts, and lists
+   anything you should check before recording.
+3. Edit the draft and click **Approve & use this script**. Nothing is recorded,
+   generated or rendered before approval. **Draft the script again** requests a new draft.
+4. Upload your recording or generate it with ElevenLabs, then **Analyze & plan scenes**.
+   Scenes follow the source's points in order with your saved styles. The source's
+   footage, music, branding and wording are not reused.
+
+Source files and the cached transcript live in the project's `reference/source/`.
+Replacing the source video requires a fresh draft. Check that you have the right to
+adapt a video's idea before publishing.
+
+```powershell
+python -m unittest -v test_recreate
+```
+
 ### Claude as an AI provider
 
 Claude appears in the provider lists for Reference Styles and the Style Library.

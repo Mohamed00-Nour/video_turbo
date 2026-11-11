@@ -66,9 +66,12 @@
   $('reference-provider-badge').textContent=providerName(ref.analysis?ref.provider:$('reference-provider').value);
   const state=app.getState();
   const active=state.job?.project===project.id && ['running','cancelling'].includes(state.job.status);
-  $('reference-build').hidden=ref.workflow==='flow';
-  $('reference-plan').textContent=ref.workflow==='flow' ? (!project.editor.script.trim()?'Analyze reference & draft script':'Prepare Flow storyboard') : 'Analyze & plan scenes';
+  const recreating=window.VideoTurboRecreate?.drafting(project);
+  $('reference-build').hidden=ref.workflow==='flow' || recreating;
+  $('reference-plan').textContent=ref.workflow==='flow' ? (!project.editor.script.trim()?'Analyze reference & draft script':'Prepare Flow storyboard') : recreating ? (ref.status==='script_review'?'Draft the script again':'Analyze source & draft script') : 'Analyze & plan scenes';
   $('reference-status').textContent=active ? state.job.stage : ref.workflow!=='flow' && ref.stale && ref.analysis ? 'Your inputs changed. Analyze again to adapt the scenes to the current reference and recording.' : (ref.workflow==='flow' ? (ref.stale && ref.flow_plan ? 'Your inputs changed. Prepare the Flow storyboard again before importing or building.' : ({awaiting_inputs:'Add your reference, spoken script and voiceover, then prepare your Flow storyboard.',script_review:'Review and approve the script draft below, then add your voiceover.',awaiting_clips:'Storyboard ready. Generate your scenes in Flow and import each clip below.',ready:'All Flow clips are imported. Review the scenes, then build your final video.',complete:'Your Flow video is ready.',failed:'Flow preparation needs attention. Check the message and retry.',render_failed:'Your Flow clips are saved. Check the build log and retry.',cancelled:'Cancelled. Your saved storyboard and clips are kept.'}[ref.status] || 'Prepare your Flow storyboard when your inputs are ready.')) : ({awaiting_inputs:'Reference project ready. Check your files below, then analyze the style.',ready:'Style analyzed and scenes prepared. Edit the scenes below or build your video.',complete:'Your reference-style video is ready.',render_failed:'The scene plan is ready. Check the build log and retry Build video.',failed:'Analysis or building needs attention. Your files are saved; check the message and retry.',cancelled:'Cancelled. Your files are saved; analyze again when ready.',interrupted:'Analysis was interrupted. Your files are saved; retry analysis.'}[ref.status] || 'Ready to analyze your reference.'));
+  if(recreating && !active)$('reference-status').textContent=ref.status==='script_review'?'Review and approve your new script below, then add your voiceover.':ref.status==='failed'?'Drafting needs attention. Check the message and retry.':'Add your source video, then draft your new script from its idea.';
+  window.VideoTurboRecreate?.update(project);
   message('reference-project-error',ref.error || '');
   const library=ref.library_styles || [];
   $('reference-source').hidden=library.length>0;
@@ -145,7 +148,7 @@
   return provider;
  }
  async function open(){
-  $('reference-form').reset();window.VideoTurboVoice?.sync();window.VideoTurboStyles?.openCreation();window.VideoTurboFlow?.syncCreation();message('reference-create-error','');$('reference-dialog').showModal();$('reference-name').focus();
+  $('reference-form').reset();window.VideoTurboVoice?.sync();window.VideoTurboStyles?.openCreation();window.VideoTurboFlow?.syncCreation();window.VideoTurboRecreate?.syncCreation();message('reference-create-error','');$('reference-dialog').showModal();$('reference-name').focus();
   try{
    connectionSettings=await app.api('/api/reference/settings');
    $('reference-create-provider').value=$('reference-provider').value || connectionSettings.provider || 'codex';
@@ -163,17 +166,18 @@
  $('reference-close').onclick=()=>$('reference-dialog').close();
  $('reference-form').onsubmit=e=>{e.preventDefault();action(async()=>{
   const flow=window.VideoTurboFlow?.creation() || {workflow:'reference',idea:''};
-  const drafting=flow.workflow==='flow' && $('flow-story-source').value==='idea';
-  if(drafting && !flow.idea)throw new Error('Describe your video idea first.');
+  const recreating=window.VideoTurboRecreate?.creation() || null;
+  const drafting=(flow.workflow==='flow' && $('flow-story-source').value==='idea') || Boolean(recreating);
+  if(flow.workflow==='flow' && drafting && !flow.idea)throw new Error('Describe your video idea first.');
   const library=flow.workflow==='reference' ? (window.VideoTurboStyles?.selection() || {styles:[],mix:{}}) : {styles:[],mix:{}};
-  const files=[...(library.styles.length?[]:[['reference',$('reference-file').files[0]]]),...($('reference-voice-source').value==='upload' && !drafting?[['voice',$('reference-voice').files[0]]]:[]),...Array.from($('reference-assets').files).map(f=>['media',f])];
+  const files=[...(library.styles.length?[]:[['reference',$('reference-file').files[0]]]),...(recreating?.file?[['source',recreating.file]]:[]),...($('reference-voice-source').value==='upload' && !drafting?[['voice',$('reference-voice').files[0]]]:[]),...Array.from($('reference-assets').files).map(f=>['media',f])];
   if(files.some(([,f])=>!f || f.size>4*1024**3))throw new Error('Choose supported media files up to 4 GB each.');
   if(app.getState().dirty)await app.save();
   const provider=await applyCreationProvider();
-  const project=await app.api('/api/reference/create',{provider,voice_source:$('reference-voice-source').value,name:$('reference-name').value,script:drafting?'':$('reference-script').value,...flow,instructions:$('reference-instructions').value,styles:library.styles,style_mix:library.mix});
+  const project=await app.api('/api/reference/create',{provider,voice_source:$('reference-voice-source').value,name:$('reference-name').value,script:drafting?'':$('reference-script').value,...flow,instructions:$('reference-instructions').value,styles:library.styles,style_mix:library.mix,...(recreating?{recreate:recreating.options}:{})});
   app.install(project);$('reference-dialog').close();await app.refreshState();
   for(const [role,file] of files){app.toast('Uploading '+file.name+'...');await upload(file,role);}
-  await connection();app.toast(flow.workflow==='flow'?'Flow project ready. Analyze the reference to prepare your script or storyboard.':library.styles.length?'Project ready. Click Analyze & plan scenes to apply your saved styles.':'Reference project ready. Analyze the style to prepare your new scenes.');
+  await connection();app.toast(flow.workflow==='flow'?'Flow project ready. Analyze the reference to prepare your script or storyboard.':recreating?'Project ready. Click Analyze source & draft script.':library.styles.length?'Project ready. Click Analyze & plan scenes to apply your saved styles.':'Reference project ready. Analyze the style to prepare your new scenes.');
  },'reference-create-error');};
  $('reference-create-provider').onchange=()=>{
   creationDrafts[creationProvider]={model:modelValue('reference-create-model')};
@@ -227,7 +231,7 @@
    $('reference-model-refresh').disabled=working || busy || Boolean(modelStates['reference-model']?.loading);
    for(const id of ['reference-save-connection','reference-check-connection'])$(id).disabled=working || busy || !modelStates['reference-model']?.ready;
    $('reference-save-style').disabled=working || busy;
-   const p=app.getState().project,r=p?.reference_style,ready=Boolean((r?.reference_file || r?.library_styles?.length) && ((r.workflow==='flow' && r.idea && !p?.editor?.script?.trim()) || ((p?.voiceover || window.VideoTurboVoice?.canGenerate()) && p?.editor?.script?.trim())));
+   const p=app.getState().project,r=p?.reference_style,ready=Boolean((r?.reference_file || r?.library_styles?.length) && ((r.workflow==='flow' && r.idea && !p?.editor?.script?.trim()) || (window.VideoTurboRecreate?.drafting(p) && window.VideoTurboRecreate?.hasSource(p)) || ((p?.voiceover || window.VideoTurboVoice?.canGenerate()) && p?.editor?.script?.trim())));
    for(const id of ['reference-plan','reference-build'])$(id).disabled=working || busy || !ready || !modelStates['reference-model']?.ready;
    if(r && Object.keys(r).length && (r.stale || !['ready','complete','render_failed'].includes(r.status))){$('build').disabled=true;$('render-preview').disabled=true;}
    window.VideoTurboFlow?.lock(working || busy);

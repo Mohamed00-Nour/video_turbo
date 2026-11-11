@@ -226,7 +226,7 @@
    try{
     await load();
     // Saved styles belong to Video Turbo animation; start there when some are ready.
-    if(library.styles.some(usable)){$('reference-workflow').value='reference';window.VideoTurboFlow?.syncCreation();}
+    if(library.styles.some(usable)){$('reference-workflow').value='reference';(window.VideoTurboRecreate || window.VideoTurboFlow)?.syncCreation();}
    }catch{library.styles=[];}
    renderPicker();
   },

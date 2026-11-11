@@ -42,7 +42,7 @@
   $('voice-connection-status').textContent=loading?'Loading ElevenLabs voices and models...':!settings?.configured?'Connect your ElevenLabs account in Voice settings first.':catalog?catalog.voices.length+' voices and '+catalog.models.length+' speech models loaded.':'API key saved. Refresh to load your voices and models.';
   const upload=$('reference-voice-source').value==='upload';
   $('reference-voice-upload').hidden=!upload;$('reference-voice').required=upload;
-  window.VideoTurboFlow?.syncCreation();
+  (window.VideoTurboRecreate || window.VideoTurboFlow)?.syncCreation();
  }
  function lock(blocked){
   if(!app)return;

@@ -30,6 +30,7 @@ from ai_generation import AIGenerator
 from ai_series import SeriesLibrary
 import reference_styles
 import style_library
+import recreate
 import antigravity_brief
 import flow_workflow
 import voice_generation
@@ -302,16 +303,22 @@ class Studio:
             self.enqueue(job, self.run, path, read_cache(path / 'config.json'), 0)
             return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
 
-    def create_reference(self, name, script, instructions='', provider=None, workflow='reference', idea='', styles=None, style_mix=None):
+    def create_reference(self, name, script, instructions='', provider=None, workflow='reference', idea='', styles=None, style_mix=None, source=None):
         self.idle()
         if workflow not in ('reference', 'flow'): raise ValueError('Choose a supported creation path.')
+        if source is not None:
+            # Recreate a source video's idea: the script is drafted later, for review.
+            if workflow != 'reference': raise ValueError('Recreating a video works with Video Turbo animation.')
+            if not styles: raise ValueError('Choose at least one saved style for the recreated video.')
+            source = recreate.options(source)
+            script = ''
         library = None
         if styles:
             if workflow != 'reference': raise ValueError('Saved styles work with Video Turbo animation. Choose it under Video creation.')
             library = style_library.snapshot(self.data, styles)
             style_mix = style_library.validate_mix(style_mix, len(library))
         if not isinstance(idea, str) or len(idea) > 10000: raise ValueError('Keep your idea below 10,000 characters.')
-        if not isinstance(script, str) or len(script.strip()) > 100000 or (not script.strip() and not (workflow == 'flow' and idea.strip())):
+        if not isinstance(script, str) or len(script.strip()) > 100000 or (not script.strip() and not (workflow == 'flow' and idea.strip()) and source is None):
             raise ValueError('Provide your spoken script, or a video idea for Google Flow.')
         if not isinstance(instructions, str) or len(instructions) > 10000:
             raise ValueError('Keep style instructions below 10,000 characters.')
@@ -323,7 +330,22 @@ class Studio:
         self.save(identifier, editor)
         state = {'status': 'awaiting_inputs', 'reference_file': '', 'instructions': instructions, 'analysis_provider': provider, 'workflow': workflow, 'idea': idea.strip(), 'error': ''}
         if library: state.update(library_styles=library, style_mix=style_mix)
+        if source is not None: state['recreate'] = source
         write_json(self.project(identifier) / 'reference_style.json', state)
+        return self.load(identifier)
+
+    def approve_recreate_script(self, identifier, script):
+        self.idle(identifier)
+        path = self.project(identifier)
+        state = read_cache(path / 'reference_style.json')
+        if not recreate.is_recreate(state) or state.get('status') != 'script_review': raise ValueError('Draft a script from the source video first.')
+        if state['recreate'].get('drafted_source') != reference_styles.file_signature(recreate.source_path(path, state)):
+            raise ValueError('Your source video changed. Draft the script again first.')
+        if not isinstance(script, str) or not 1 <= len(script.strip()) <= 100000: raise ValueError('Provide the script you reviewed.')
+        editor = self.load(identifier)['editor']; editor['script'] = script.strip()
+        self.save(identifier, editor)
+        state.update(status='awaiting_inputs', draft_script='', error='')
+        write_json(path / 'reference_style.json', state)
         return self.load(identifier)
 
     def approve_flow_script(self, identifier, script):
@@ -422,7 +444,12 @@ class Studio:
                 reference_styles.media_reference(path, state.get('reference_file', ''))
             flow = state.get('workflow') == 'flow'
             if flow: build = False
-            drafting = flow and not (path / 'script.txt').read_text('utf-8-sig').strip()
+            unscripted = not (path / 'script.txt').read_text('utf-8-sig').strip()
+            recreating = recreate.is_recreate(state) and unscripted
+            drafting = (flow or recreating) and unscripted
+            if recreating:
+                build = False
+                recreate.require_source(path, state)
             selected_voice = voice_generation.project_state(path)
             if not drafting and selected_voice['source'] == 'elevenlabs' and (not selected_voice.get('generated_current') or selected_voice.get('stale')):
                 if provider and provider not in reference_styles.PROVIDER_NAMES: raise ValueError(reference_styles.PROVIDER_CHOICE)
@@ -437,12 +464,12 @@ class Studio:
             selected = connections.get('providers', {}).get(provider, connections)
             if not selected['installed']:
                 raise ValueError('Connect the selected local AI provider before analyzing.')
-            if drafting and not state.get('idea'): raise ValueError('Add a video idea first.')
+            if drafting and flow and not state.get('idea'): raise ValueError('Add a video idea first.')
             if not drafting and not (path / 'script.txt').read_text('utf-8-sig').strip(): raise ValueError('Add your spoken script first.')
             state.update(analysis_provider=provider)
             state.pop('stale', None)
             write_json(path / 'reference_style.json', state)
-            job = self._ai_job(identifier, 'reference_build' if build else 'reference_plan', 'Analyzing reference with ' + reference_styles.PROVIDER_NAMES[provider])
+            job = self._ai_job(identifier, 'reference_build' if build else 'reference_plan', ('Drafting your script with ' if recreating else 'Analyzing reference with ') + reference_styles.PROVIDER_NAMES[provider])
             self.enqueue(job, self.run, path, read_cache(path / 'config.json'), 0)
             return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
 
@@ -1030,7 +1057,7 @@ class Studio:
                 reference = read_cache(path / 'reference_style.json')
                 if reference and action:
                     if job['status'] == 'complete':
-                        if reference.get('workflow') == 'flow' and action == 'reference_plan': reference['error'] = ''
+                        if action == 'reference_plan' and (reference.get('workflow') == 'flow' or reference.get('status') == 'script_review'): reference['error'] = ''
                         else: reference.update(status='ready' if action in ('reference_plan','preview') else 'complete', error='')
                     else:
                         reference.update(status='render_failed' if action in ('build','preview') and reference.get('analysis') else job['status'], error=reference.get('error') or job.get('error',''))
@@ -1122,7 +1149,7 @@ class Handler(BaseHTTPRequestHandler):
             if host not in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'):
                 self.json_response({'error': 'Use the localhost address.'}, 403); return
             if parsed.path == '/api/health':
-                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series', 'parallel-publishing', 'analytics', 'reference-styles', 'reference-codex', 'reference-models', 'elevenlabs-voice', 'google-flow-handoff', 'flow-portable-prompts', 'pc-tips', 'pc-chatgpt-sign-in', 'pc-auto-ideas', 'pc-visual-modes', 'pc-problem-first', 'pc-google-first', 'antigravity-brief-automation', 'antigravity-new-episodes', 'parallel-production', 'style-library', 'reference-claude']})
+                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series', 'parallel-publishing', 'analytics', 'reference-styles', 'reference-codex', 'reference-models', 'elevenlabs-voice', 'google-flow-handoff', 'flow-portable-prompts', 'pc-tips', 'pc-chatgpt-sign-in', 'pc-auto-ideas', 'pc-visual-modes', 'pc-problem-first', 'pc-google-first', 'antigravity-brief-automation', 'antigravity-new-episodes', 'parallel-production', 'style-library', 'reference-claude', 'recreate-video']})
             elif parsed.path == '/api/state':
                 with self.studio.lock:
                     self.json_response({'token': self.studio.token, 'projects': self.studio.list_projects(),
@@ -1268,6 +1295,10 @@ class Handler(BaseHTTPRequestHandler):
                         if ext not in sections.VIDEO_EXTS: raise ValueError('Choose a video reference.')
                         if not read_cache(project / 'reference_style.json'): raise ValueError('Create a Reference Styles project first.')
                         target = project / 'reference' / ('source-' + uuid.uuid4().hex[:12] + ext)
+                    elif role == 'source':
+                        if ext not in sections.VIDEO_EXTS: raise ValueError('Choose the source video (MP4, MOV, WebM or MKV).')
+                        if not recreate.is_recreate(read_cache(project / 'reference_style.json')): raise ValueError('Create a Recreate project first.')
+                        target = project / recreate.SOURCE_DIR / ('upload-' + uuid.uuid4().hex[:12] + ext)
                     elif role == 'flow_clip':
                         if ext not in sections.VIDEO_EXTS: raise ValueError('Choose a video downloaded from Flow.')
                         reference = read_cache(project / 'reference_style.json')
@@ -1313,6 +1344,12 @@ class Handler(BaseHTTPRequestHandler):
                         reference = read_cache(project / 'reference_style.json')
                         reference.update(reference_file=target.relative_to(project).as_posix(), status='awaiting_inputs', error='')
                         write_json(project / 'reference_style.json', reference)
+                    if role == 'source':
+                        reference = read_cache(project / 'reference_style.json')
+                        reference['recreate'].update(source_file=target.relative_to(project).as_posix(), source_url='')
+                        if reference.get('status') == 'script_review': reference.update(draft_script='')
+                        reference.update(status='awaiting_inputs', error='')
+                        write_json(project / 'reference_style.json', reference)
                     if role == 'voice':
                         voice_settings = read_cache(project / 'voiceover.json'); voice_settings['source'] = 'upload'
                         write_json(project / 'voiceover.json', voice_settings)
@@ -1347,7 +1384,7 @@ class Handler(BaseHTTPRequestHandler):
                     result = self.studio.start_voice(data['id'], data.get('build', False) is True, data.get('force', False) is True)
                 elif parsed.path == '/api/reference/create':
                     result = self.studio.create_reference(data['name'], data['script'], data.get('instructions', ''), data.get('provider'), data.get('workflow', 'reference'), data.get('idea', ''),
-                                                          data.get('styles') or None, data.get('style_mix'))
+                                                          data.get('styles') or None, data.get('style_mix'), data.get('recreate'))
                 elif parsed.path == '/api/styles/create':
                     style = style_library.create(self.studio.data, data.get('name', ''), data.get('provider', 'antigravity'), data.get('model'))
                     result = {**self.studio.list_styles(), 'style': style}
@@ -1365,6 +1402,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.studio.idle(data['id'])
                     style = style_library.from_project(self.studio.data, self.studio.project(data['id']), data.get('name', ''))
                     result = {**self.studio.list_styles(), 'style': style}
+                elif parsed.path == '/api/reference/recreate/approve':
+                    result = self.studio.approve_recreate_script(data['id'], data['script'])
                 elif parsed.path == '/api/reference/flow/approve':
                     result = self.studio.approve_flow_script(data['id'], data['script'])
                 elif parsed.path == '/api/reference/flow/clip':
@@ -1478,7 +1517,7 @@ def running_studio(url, require_series=False, require_parallel=False, require_an
                 and isinstance(data.get('engine'), str) and Path(data['engine']).resolve() == ENGINE
                 and (not require_pc or all(flag in data.get('features', []) for flag in ('pc-tips', 'pc-chatgpt-sign-in', 'pc-auto-ideas', 'pc-visual-modes', 'pc-problem-first', 'pc-google-first')))
                 and (not require_brief or all(flag in data.get('features', []) for flag in ('antigravity-brief-automation', 'antigravity-new-episodes', 'parallel-production')))
-                and (not require_styles or all(flag in data.get('features', []) for flag in ('style-library', 'reference-claude')))
+                and (not require_styles or all(flag in data.get('features', []) for flag in ('style-library', 'reference-claude', 'recreate-video')))
                 and (not require_series or 'ai-series' in data.get('features', []))
                 and (not require_parallel or 'parallel-publishing' in data.get('features', []))
                 and (not require_analytics or 'analytics' in data.get('features', []))
