@@ -6,7 +6,10 @@
  const providerDrafts={};
  const creationDrafts={};
  let creationProvider='codex';
- const providerName=key=>key==='codex'?'Codex / ChatGPT':'Antigravity Gemini';
+ const providerName=key=>key==='codex'?'Codex / ChatGPT':key==='claude'?'Claude':'Antigravity Gemini';
+ // Codex and Claude accept a blank model: the client then uses its own configured default.
+ const blankDefault=key=>key==='codex' || key==='claude';
+ const modelLabel=key=>key==='codex'?'Codex model':key==='claude'?'Claude model':'Gemini model';
  const modelStates={};
  const modelRequests={};
  const modelCatalogs={};
@@ -35,18 +38,18 @@
    }
    if(modelStates[id]!==state)return;
    const rows=result.models || [];
-   state.ids=new Set(rows.map(row=>row.id));if(provider==='codex')state.ids.add('');
+   state.ids=new Set(rows.map(row=>row.id));if(blankDefault(provider))state.ids.add('');
    control.replaceChildren();
-   if(provider==='codex')control.add(new Option('Use configured Codex default',''));
+   if(blankDefault(provider))control.add(new Option(provider==='claude'?'Use my Claude default model':'Use configured Codex default',''));
    rows.forEach(row=>control.add(new Option(row.name,row.id)));
-   const desired=preferred ?? (provider==='codex'?'':rows.find(row=>row.is_default)?.id || rows[0]?.id);
-   const available=(provider==='codex' && desired==='') || rows.some(row=>row.id===desired);
+   const desired=preferred ?? (blankDefault(provider)?'':rows.find(row=>row.is_default)?.id || rows[0]?.id);
+   const available=(blankDefault(provider) && desired==='') || rows.some(row=>row.id===desired);
    if(!available && desired){
     const missing=new Option('Saved model unavailable: '+desired,desired);missing.disabled=true;control.add(missing,0);
    }
    control.value=desired;
    state.ready=available;state.loading=false;
-   status.textContent=available?rows.length+' models returned by '+providerName(provider)+'.': 'Your saved model is unavailable. Choose a model from the list.';
+   status.textContent=available?(provider==='claude'?'Signed in to Claude. Each choice uses the newest model of that family.':rows.length+' models returned by '+providerName(provider)+'.'): 'Your saved model is unavailable. Choose a model from the list.';
   }catch(error){
    if(modelStates[id]!==state)return;
    state.loading=false;control.replaceChildren(new Option('Models unavailable',''));
@@ -67,6 +70,14 @@
   $('reference-plan').textContent=ref.workflow==='flow' ? (!project.editor.script.trim()?'Analyze reference & draft script':'Prepare Flow storyboard') : 'Analyze & plan scenes';
   $('reference-status').textContent=active ? state.job.stage : ref.workflow!=='flow' && ref.stale && ref.analysis ? 'Your inputs changed. Analyze again to adapt the scenes to the current reference and recording.' : (ref.workflow==='flow' ? (ref.stale && ref.flow_plan ? 'Your inputs changed. Prepare the Flow storyboard again before importing or building.' : ({awaiting_inputs:'Add your reference, spoken script and voiceover, then prepare your Flow storyboard.',script_review:'Review and approve the script draft below, then add your voiceover.',awaiting_clips:'Storyboard ready. Generate your scenes in Flow and import each clip below.',ready:'All Flow clips are imported. Review the scenes, then build your final video.',complete:'Your Flow video is ready.',failed:'Flow preparation needs attention. Check the message and retry.',render_failed:'Your Flow clips are saved. Check the build log and retry.',cancelled:'Cancelled. Your saved storyboard and clips are kept.'}[ref.status] || 'Prepare your Flow storyboard when your inputs are ready.')) : ({awaiting_inputs:'Reference project ready. Check your files below, then analyze the style.',ready:'Style analyzed and scenes prepared. Edit the scenes below or build your video.',complete:'Your reference-style video is ready.',render_failed:'The scene plan is ready. Check the build log and retry Build video.',failed:'Analysis or building needs attention. Your files are saved; check the message and retry.',cancelled:'Cancelled. Your files are saved; analyze again when ready.',interrupted:'Analysis was interrupted. Your files are saved; retry analysis.'}[ref.status] || 'Ready to analyze your reference.'));
   message('reference-project-error',ref.error || '');
+  const library=ref.library_styles || [];
+  $('reference-source').hidden=library.length>0;
+  $('reference-library-summary').hidden=!library.length;
+  if(library.length){
+   const parts=window.VideoTurboStyles?.mixSummary(ref.style_mix || {},library) || '';
+   $('reference-library-summary').textContent=(library.length>1?'Saved styles: ':'Saved style: ')+library.map((row,i)=>(library.length>1?'ABC'[i]+' · ':'')+row.name).join(' + ')+(parts?'. '+parts:'.');
+  }
+  $('reference-save-style').hidden=!ref.analysis || ref.workflow==='flow';
   const player=$('reference-player');player.hidden=!ref.reference_file;
   if(ref.sampled)player.poster=app.mediaUrl('reference/frames/frame-0001.jpg',project.id);
   if(ref.reference_file){const src=app.mediaUrl(ref.reference_file,project.id);if(player.getAttribute('src')!==src)player.src=src;}
@@ -81,11 +92,11 @@
   const provider=$('reference-provider').value;
   const config=providerDrafts[provider] || connectionSettings?.providers?.[provider] || {};
   currentProvider=provider;
-  const preferred=config.model ?? (provider==='codex'?'':'gemini-3.8-flash-medium');
+  const preferred=config.model ?? (blankDefault(provider)?'':'gemini-3.8-flash-medium');
   $('reference-cli').value=config.cli_path || '';
-  $('reference-model-label').textContent=provider==='codex'?'Codex model':'Gemini model';
-  $('reference-cli-label').textContent=provider==='codex'?'Codex CLI path (optional)':'Antigravity CLI path (optional)';
-  $('reference-cli').placeholder=provider==='codex'?'Automatically detected codex executable':'Automatically detected agy executable';
+  $('reference-model-label').textContent=modelLabel(provider);
+  $('reference-cli-label').textContent=provider==='codex'?'Codex CLI path (optional)':provider==='claude'?'Claude CLI path (optional)':'Antigravity CLI path (optional)';
+  $('reference-cli').placeholder='Automatically detected '+(provider==='codex'?'codex':provider==='claude'?'claude':'agy')+' executable';
   const found=connectionSettings?.providers?.[provider]?.installed;
   $('reference-connection-status').textContent=found?'Local '+providerName(provider)+' CLI found. Check the connection to verify access.':'Local CLI not found. Install it or enter its executable path.';
   update(app.getState().project);
@@ -116,8 +127,8 @@
   const provider=$('reference-create-provider').value;
   const config=creationDrafts[provider] || providerDrafts[provider] || connectionSettings?.providers?.[provider] || {};
   creationProvider=provider;
-  const preferred=config.model ?? (provider==='codex'?'':'gemini-3.8-flash-medium');
-  $('reference-create-model-label').textContent=provider==='codex'?'Codex model':'Gemini model';
+  const preferred=config.model ?? (blankDefault(provider)?'':'gemini-3.8-flash-medium');
+  $('reference-create-model-label').textContent=modelLabel(provider);
   $('reference-create-model').required=provider==='antigravity';
   const found=connectionSettings?.providers?.[provider]?.installed;
   $('reference-create-connection-status').textContent=found?'Local '+providerName(provider)+' CLI found. Uses its saved sign-in.':'Local CLI not found. Install it or set its path under Local AI connection in the project.';
@@ -134,7 +145,7 @@
   return provider;
  }
  async function open(){
-  $('reference-form').reset();window.VideoTurboVoice?.sync();window.VideoTurboFlow?.syncCreation();message('reference-create-error','');$('reference-dialog').showModal();$('reference-name').focus();
+  $('reference-form').reset();window.VideoTurboVoice?.sync();window.VideoTurboStyles?.openCreation();window.VideoTurboFlow?.syncCreation();message('reference-create-error','');$('reference-dialog').showModal();$('reference-name').focus();
   try{
    connectionSettings=await app.api('/api/reference/settings');
    $('reference-create-provider').value=$('reference-provider').value || connectionSettings.provider || 'codex';
@@ -154,14 +165,15 @@
   const flow=window.VideoTurboFlow?.creation() || {workflow:'reference',idea:''};
   const drafting=flow.workflow==='flow' && $('flow-story-source').value==='idea';
   if(drafting && !flow.idea)throw new Error('Describe your video idea first.');
-  const files=[['reference',$('reference-file').files[0]],...($('reference-voice-source').value==='upload' && !drafting?[['voice',$('reference-voice').files[0]]]:[]),...Array.from($('reference-assets').files).map(f=>['media',f])];
+  const library=flow.workflow==='reference' ? (window.VideoTurboStyles?.selection() || {styles:[],mix:{}}) : {styles:[],mix:{}};
+  const files=[...(library.styles.length?[]:[['reference',$('reference-file').files[0]]]),...($('reference-voice-source').value==='upload' && !drafting?[['voice',$('reference-voice').files[0]]]:[]),...Array.from($('reference-assets').files).map(f=>['media',f])];
   if(files.some(([,f])=>!f || f.size>4*1024**3))throw new Error('Choose supported media files up to 4 GB each.');
   if(app.getState().dirty)await app.save();
   const provider=await applyCreationProvider();
-  const project=await app.api('/api/reference/create',{provider,voice_source:$('reference-voice-source').value,name:$('reference-name').value,script:drafting?'':$('reference-script').value,...flow,instructions:$('reference-instructions').value});
+  const project=await app.api('/api/reference/create',{provider,voice_source:$('reference-voice-source').value,name:$('reference-name').value,script:drafting?'':$('reference-script').value,...flow,instructions:$('reference-instructions').value,styles:library.styles,style_mix:library.mix});
   app.install(project);$('reference-dialog').close();await app.refreshState();
   for(const [role,file] of files){app.toast('Uploading '+file.name+'...');await upload(file,role);}
-  await connection();app.toast(flow.workflow==='flow'?'Flow project ready. Analyze the reference to prepare your script or storyboard.':'Reference project ready. Analyze the style to prepare your new scenes.');
+  await connection();app.toast(flow.workflow==='flow'?'Flow project ready. Analyze the reference to prepare your script or storyboard.':library.styles.length?'Project ready. Click Analyze & plan scenes to apply your saved styles.':'Reference project ready. Analyze the style to prepare your new scenes.');
  },'reference-create-error');};
  $('reference-create-provider').onchange=()=>{
   creationDrafts[creationProvider]={model:modelValue('reference-create-model')};
@@ -185,6 +197,11 @@
  $('reference-model-refresh').onclick=()=>loadModels('reference-model',$('reference-provider').value,modelValue('reference-model'),true);
  $('reference-replace').onchange=()=>action(async()=>{const f=$('reference-replace').files[0];if(f)await upload(f,'reference');$('reference-replace').value='';});
  $('reference-plan').onclick=()=>action(()=>start(false));
+ $('reference-save-style').onclick=()=>action(async()=>{
+  const result=await app.api('/api/styles/from-project',{id:app.getState().project.id});
+  window.VideoTurboStyles?.refresh(result);
+  app.toast('Saved "'+result.style.name+'" to your style library.');
+ });
  $('reference-build').onclick=()=>action(()=>start(true));
  $('reference-provider').onchange=()=>{
   providerDrafts[currentProvider]={cli_path:$('reference-cli').value,model:modelValue('reference-model')};
@@ -195,6 +212,12 @@
  $('reference-check-connection').onclick=()=>action(async()=>{await saveConnection();$('reference-connection-status').textContent='Checking '+providerName($('reference-provider').value)+'...';const r=await app.api('/api/reference/check',{});$('reference-connection-status').textContent='Connected to '+providerName(r.provider)+' ('+(r.model || 'configured default model')+').';});
  window.VideoTurboReference={
   configure(options){app=options;window.VideoTurboFlow?.configure(options);connection().catch(e=>{$('reference-connection-status').textContent=e.message;});},update,
+  // Shared with the Style Library dialog.
+  loadModels,providerName,modelLabel,blankDefault,
+  modelValue,
+  modelReady:id=>Boolean(modelStates[id]?.ready),
+  modelLoading:id=>Boolean(modelStates[id]?.loading),
+  settings:()=>connectionSettings,
   lock(working){
    if(!app)return;
    $('reference-create').disabled=working || busy || !connectionSettings?.providers || !modelStates['reference-create-model']?.ready;
@@ -203,7 +226,8 @@
    $('reference-create-model-refresh').disabled=working || busy || Boolean(modelStates['reference-create-model']?.loading);
    $('reference-model-refresh').disabled=working || busy || Boolean(modelStates['reference-model']?.loading);
    for(const id of ['reference-save-connection','reference-check-connection'])$(id).disabled=working || busy || !modelStates['reference-model']?.ready;
-   const p=app.getState().project,r=p?.reference_style,ready=Boolean(r?.reference_file && ((r.workflow==='flow' && r.idea && !p?.editor?.script?.trim()) || ((p?.voiceover || window.VideoTurboVoice?.canGenerate()) && p?.editor?.script?.trim())));
+   $('reference-save-style').disabled=working || busy;
+   const p=app.getState().project,r=p?.reference_style,ready=Boolean((r?.reference_file || r?.library_styles?.length) && ((r.workflow==='flow' && r.idea && !p?.editor?.script?.trim()) || ((p?.voiceover || window.VideoTurboVoice?.canGenerate()) && p?.editor?.script?.trim())));
    for(const id of ['reference-plan','reference-build'])$(id).disabled=working || busy || !ready || !modelStates['reference-model']?.ready;
    if(r && Object.keys(r).length && (r.stale || !['ready','complete','render_failed'].includes(r.status))){$('build').disabled=true;$('render-preview').disabled=true;}
    window.VideoTurboFlow?.lock(working || busy);

@@ -786,6 +786,60 @@ Progress, cancellation and retry use the existing Studio job controls. Briefs
 and narration settings are saved per project, so failures can be retried without
 creating another project. Manual JSON paste/file import remains available.
 
+## Style Library: save styles once, mix them in new videos
+
+Open **Style library** in the sidebar to keep reusable styles for **Video Turbo
+animation**. Choose the AI under **AI for style analysis** (Claude, Codex /
+ChatGPT or Antigravity / Gemini) and its model, then open **Add a style**: give
+it a name, a reference video up to three minutes long and up to six optional
+screenshots, and click **Add & analyze style**. The analysis runs once as a
+production job. It looks at the style only: no script, scenes or rendering.
+
+Each style card shows its palette and a breakdown in six categories:
+
+| Category | Saved values |
+| --- | --- |
+| Colors | background, gradient end, text, accent, secondary text, contrast background |
+| Fonts | serif / sans / display heading font, italic |
+| Motion | entrance, floating distance and cycle, shadow, corner roundness |
+| Transitions | fade / lift / blur, plus cut / wipe / settle between scenes |
+| Captions | phrase or word-by-word, caption height |
+| Layouts | preferred scene compositions, backdrops, image treatment, text position, highlight style, motifs, decorative lines and grid |
+
+**Edit** changes any value. **Analyze again** uses the provider and model
+selected at the top of the library. **Save style to library** on an analyzed
+Reference Styles project copies its style without a new AI request.
+
+To use styles, open **Create from Reference**. When saved styles exist, the dialog
+starts on **Video Turbo animation**. Pick one or two styles, then the voiceover
+source, AI provider and model, and your script. With two styles, each category
+can use **Style A**, **Style B** or **AI mix**. Categories set to A or B are copied
+exactly after the AI answers, so the AI cannot change them. AI mix categories are
+blended during scene planning. Layout preferences guide the scene plan; the
+compositions still have to fit your script and media. Leave the picker empty to
+upload a one-off reference video as before. Google Flow projects are unchanged.
+
+Projects keep a copy of their chosen styles. **Analyze & plan scenes** picks up
+later edits to those styles; deleting a library style does not break a project.
+Styles live in `output/reference_styles/library/` and are excluded from Git;
+deleted styles are moved to `output/reference_styles/deleted/`.
+
+### Claude as an AI provider
+
+Claude appears in the provider lists for Reference Styles and the Style Library.
+It uses the Claude Code CLI with your **claude.ai subscription sign-in**, found
+on PATH, at `~/.local/bin/claude.exe`, or inside the Claude Code VS Code extension.
+Run `claude auth login` once if needed. API-key logins and other API providers are
+refused, and API key variables are removed from its environment. Requests run in
+restricted mode with only the Read, WebSearch and WebFetch tools: no shell, no file
+edits, no personal settings, hooks or MCP servers, and no saved sessions. The
+model list offers **Opus**, **Sonnet** and **Haiku** (each the newest of its family)
+or your Claude default. Requests count toward your plan's usage limits.
+
+```powershell
+python -m unittest -v test_style_library test_reference_styles
+```
+
 ## Reference Styles with local Antigravity or Codex
 
 For built-in animation, select **Video Turbo animation** under **Video creation**.

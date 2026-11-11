@@ -29,6 +29,7 @@ from analytics import Analytics
 from ai_generation import AIGenerator
 from ai_series import SeriesLibrary
 import reference_styles
+import style_library
 import antigravity_brief
 import flow_workflow
 import voice_generation
@@ -133,6 +134,8 @@ class Studio:
         except Exception:
             with self.lock:
                 job.update(status='cancelled' if job.get('cancel') else 'failed', stage='Production failed', error='Production failed. Your project is saved; retry its step.')
+                if job.get('style'): style_library.end_analysis(self.data, job['style'], job['status'], job['error'])
+                if job.get('project') not in self.registry: return
                 path = self.project(job['project'])
                 action = job.get('next_action', job['action'])
                 filename = 'pc_tips.json' if action.startswith('pc_') else 'reference_style.json' if action.startswith('reference_') else 'ai_workflow.json'
@@ -299,22 +302,28 @@ class Studio:
             self.enqueue(job, self.run, path, read_cache(path / 'config.json'), 0)
             return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
 
-    def create_reference(self, name, script, instructions='', provider=None, workflow='reference', idea=''):
+    def create_reference(self, name, script, instructions='', provider=None, workflow='reference', idea='', styles=None, style_mix=None):
         self.idle()
         if workflow not in ('reference', 'flow'): raise ValueError('Choose a supported creation path.')
+        library = None
+        if styles:
+            if workflow != 'reference': raise ValueError('Saved styles work with Video Turbo animation. Choose it under Video creation.')
+            library = style_library.snapshot(self.data, styles)
+            style_mix = style_library.validate_mix(style_mix, len(library))
         if not isinstance(idea, str) or len(idea) > 10000: raise ValueError('Keep your idea below 10,000 characters.')
         if not isinstance(script, str) or len(script.strip()) > 100000 or (not script.strip() and not (workflow == 'flow' and idea.strip())):
             raise ValueError('Provide your spoken script, or a video idea for Google Flow.')
         if not isinstance(instructions, str) or len(instructions) > 10000:
             raise ValueError('Keep style instructions below 10,000 characters.')
         provider = provider or reference_styles.settings(self.data).get('provider', 'antigravity')
-        if provider not in reference_styles.PROVIDER_NAMES: raise ValueError('Choose Codex / ChatGPT or Antigravity / Gemini.')
+        if provider not in reference_styles.PROVIDER_NAMES: raise ValueError(reference_styles.PROVIDER_CHOICE)
         identifier = self.create(name, 'blank')
         editor = self.load(identifier)['editor']
         editor.update(script=script.strip(), sections=[{'layout': 'title', 'title': 'Reference style', 'captions': True}])
         self.save(identifier, editor)
-        write_json(self.project(identifier) / 'reference_style.json',
-                   {'status': 'awaiting_inputs', 'reference_file': '', 'instructions': instructions, 'analysis_provider': provider, 'workflow': workflow, 'idea': idea.strip(), 'error': ''})
+        state = {'status': 'awaiting_inputs', 'reference_file': '', 'instructions': instructions, 'analysis_provider': provider, 'workflow': workflow, 'idea': idea.strip(), 'error': ''}
+        if library: state.update(library_styles=library, style_mix=style_mix)
+        write_json(self.project(identifier) / 'reference_style.json', state)
         return self.load(identifier)
 
     def approve_flow_script(self, identifier, script):
@@ -340,7 +349,8 @@ class Studio:
         stale = state.get('script_hash') != fingerprint(script)
         try:
             stale = stale or state.get('voice_signature') != reference_styles.file_signature(voiceover_path(path))
-            stale = stale or state.get('reference_signature') != reference_styles.file_signature(reference_styles.media_reference(path, state.get('reference_file', '')))
+            if not reference_styles.uses_library(state):
+                stale = stale or state.get('reference_signature') != reference_styles.file_signature(reference_styles.media_reference(path, state.get('reference_file', '')))
         except (ValueError, FileNotFoundError): stale = True
         state['stale'] = stale
         if state.get('workflow') == 'flow' and state.get('flow_plan'):
@@ -378,10 +388,10 @@ class Studio:
             action = continuation or ((('reference_plan' if reference.get('workflow') == 'flow' else 'reference_build') if reference else 'build') if build else '')
             config = read_cache(path / 'config.json')
             if action.startswith('reference_'):
-                reference_styles.media_reference(path, reference.get('reference_file', ''))
+                if not reference_styles.uses_library(reference): reference_styles.media_reference(path, reference.get('reference_file', ''))
                 connections = reference_styles.settings(self.data)
                 provider = reference.get('analysis_provider') or connections['provider']
-                if provider not in reference_styles.PROVIDER_NAMES: raise ValueError('Choose Codex / ChatGPT or Antigravity / Gemini.')
+                if provider not in reference_styles.PROVIDER_NAMES: raise ValueError(reference_styles.PROVIDER_CHOICE)
                 if not connections['providers'][provider]['installed']: raise ValueError('Connect the local analysis provider before generating and building.')
             elif action:
                 if workflow and workflow.get('source') != 'import' and (workflow.get('status') not in ('assets_ready', 'complete', 'failed', 'interrupted') or self.load(identifier)['editor']['mode'] != 'games'):
@@ -406,13 +416,16 @@ class Studio:
             path = self.project(identifier)
             state = self.reference_state(identifier)
             if not state: raise ValueError('Create a Reference Styles project first.')
-            reference_styles.media_reference(path, state.get('reference_file', ''))
+            if reference_styles.uses_library(state):
+                state['library_styles'] = style_library.refresh(self.data, state['library_styles'])
+            else:
+                reference_styles.media_reference(path, state.get('reference_file', ''))
             flow = state.get('workflow') == 'flow'
             if flow: build = False
             drafting = flow and not (path / 'script.txt').read_text('utf-8-sig').strip()
             selected_voice = voice_generation.project_state(path)
             if not drafting and selected_voice['source'] == 'elevenlabs' and (not selected_voice.get('generated_current') or selected_voice.get('stale')):
-                if provider and provider not in reference_styles.PROVIDER_NAMES: raise ValueError('Choose Codex / ChatGPT or Antigravity / Gemini.')
+                if provider and provider not in reference_styles.PROVIDER_NAMES: raise ValueError(reference_styles.PROVIDER_CHOICE)
                 state['analysis_provider'] = provider or state.get('analysis_provider')
                 state.pop('stale', None)
                 write_json(path / 'reference_style.json', state)
@@ -420,7 +433,7 @@ class Studio:
             if not drafting: voiceover_path(path)
             connections = reference_styles.settings(self.data)
             provider = provider or state.get('analysis_provider') or connections.get('provider', 'antigravity')
-            if provider not in reference_styles.PROVIDER_NAMES: raise ValueError('Choose Codex / ChatGPT or Antigravity / Gemini.')
+            if provider not in reference_styles.PROVIDER_NAMES: raise ValueError(reference_styles.PROVIDER_CHOICE)
             selected = connections.get('providers', {}).get(provider, connections)
             if not selected['installed']:
                 raise ValueError('Connect the selected local AI provider before analyzing.')
@@ -432,6 +445,63 @@ class Studio:
             job = self._ai_job(identifier, 'reference_build' if build else 'reference_plan', 'Analyzing reference with ' + reference_styles.PROVIDER_NAMES[provider])
             self.enqueue(job, self.run, path, read_cache(path / 'config.json'), 0)
             return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
+
+    def active_styles(self):
+        return {job['style'] for job in self.all_jobs() if job.get('style') and job.get('status') in ('queued', 'running', 'cancelling')}
+
+    def list_styles(self):
+        with self.lock:
+            jobs = {job['style']: job for job in self.all_jobs() if job.get('style') and job.get('status') in ('queued', 'running', 'cancelling')}
+            rows = style_library.list_styles(self.data, set(jobs))
+            for row in rows:
+                job = jobs.get(row['id'])
+                if job: row['job'] = {'id': job['id'], 'status': job['status'], 'stage': job.get('stage', ''), 'progress': job.get('progress', 0)}
+            return {'styles': rows, 'fields': style_library.FIELDS, 'categories': style_library.CATEGORY_LABELS,
+                    'layout_choices': {key: list(value) for key, value in style_library.LAYOUT_CHOICES.items()},
+                    'layout_labels': style_library.LAYOUT_LABELS, 'layout_categories': style_library.LAYOUT_CATEGORY,
+                    'max_styles': style_library.MAX_STYLES, 'providers': reference_styles.PROVIDER_NAMES}
+
+    def start_style_analysis(self, style_id, provider=None, model=None):
+        with self.lock:
+            if style_id in self.active_styles(): raise ValueError('This style is already being analyzed.')
+            value = style_library.begin_analysis(self.data, style_id, provider, model)
+            job = {'id': uuid.uuid4().hex, 'project': '', 'style': style_id, 'label': 'Style: ' + value['name'],
+                   'action': 'style_analysis', 'status': 'queued', 'stage': 'Analyzing style with ' + reference_styles.PROVIDER_NAMES[value['provider']],
+                   'progress': 0, 'logs': [], 'started': time.time(), 'cancel': False}
+            self.jobs[job['id']] = job
+            self.enqueue(job, self.run_style, style_id)
+            return self.list_styles()
+
+    def run_style(self, job, style_id):
+        command = [sys.executable, '-u', str(ENGINE / 'style_library.py'), '--style', style_id, '--data', str(self.data)]
+        try:
+            with self.lock:
+                if job['cancel']: return
+                process = subprocess.Popen(command, cwd=ENGINE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                           encoding='utf-8', errors='replace', env={**os.environ, 'PYTHONIOENCODING': 'utf-8', 'PYTHONUNBUFFERED': '1'},
+                                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+                self.processes[job['id']] = process
+            for line in process.stdout:
+                line = line.strip()
+                if not line: continue
+                with self.lock:
+                    job['logs'] = (job['logs'] + [line])[-600:]
+                    if '[STYLE]' in line: job['stage'] = line.split('[STYLE]', 1)[1].strip()
+                    if 'breaking down' in line: job['progress'] = 40
+            code = process.wait()
+            with self.lock:
+                if job['cancel']: job.update(status='cancelled', stage='Cancelled', progress=0)
+                elif code: job.update(status='failed', stage='Style analysis failed', error=style_library.record(self.data, style_id).get('error') or 'Style analysis failed. Check the log and retry.')
+                else: job.update(status='complete', stage='Style saved to your library', progress=100)
+        except Exception as error:
+            with self.lock: job.update(status='cancelled' if job['cancel'] else 'failed', stage='Style analysis failed', error=str(error))
+        finally:
+            with self.lock:
+                self.processes.pop(job['id'], None)
+                job['finished'] = time.time()
+                if job['status'] != 'complete':
+                    style_library.end_analysis(self.data, style_id, 'cancelled' if job['status'] == 'cancelled' else 'failed', job.get('error', ''))
+                self.persist_jobs()
 
     def import_brief(self, raw):
         self.idle()
@@ -985,6 +1055,8 @@ class Studio:
             if queued:
                 self.pending = [item for item in self.pending if item[0] is not job]
                 job.update(stage='Cancelled', finished=time.time())
+                if job.get('style'): style_library.end_analysis(self.data, job['style'], 'cancelled')
+            if queued and job.get('project') in self.registry:
                 path = self.project(job['project'])
                 filename = 'pc_tips.json' if job['action'].startswith('pc_') else 'reference_style.json' if job['action'].startswith('reference_') else 'ai_workflow.json'
                 if (path / filename).is_file():
@@ -1050,7 +1122,7 @@ class Handler(BaseHTTPRequestHandler):
             if host not in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'):
                 self.json_response({'error': 'Use the localhost address.'}, 403); return
             if parsed.path == '/api/health':
-                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series', 'parallel-publishing', 'analytics', 'reference-styles', 'reference-codex', 'reference-models', 'elevenlabs-voice', 'google-flow-handoff', 'flow-portable-prompts', 'pc-tips', 'pc-chatgpt-sign-in', 'pc-auto-ideas', 'pc-visual-modes', 'pc-problem-first', 'pc-google-first', 'antigravity-brief-automation', 'antigravity-new-episodes', 'parallel-production']})
+                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series', 'parallel-publishing', 'analytics', 'reference-styles', 'reference-codex', 'reference-models', 'elevenlabs-voice', 'google-flow-handoff', 'flow-portable-prompts', 'pc-tips', 'pc-chatgpt-sign-in', 'pc-auto-ideas', 'pc-visual-modes', 'pc-problem-first', 'pc-google-first', 'antigravity-brief-automation', 'antigravity-new-episodes', 'parallel-production', 'style-library', 'reference-claude']})
             elif parsed.path == '/api/state':
                 with self.studio.lock:
                     self.json_response({'token': self.studio.token, 'projects': self.studio.list_projects(),
@@ -1120,6 +1192,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not path.is_relative_to(project) or path.suffix.lower() not in UPLOAD_EXTS:
                     raise ValueError('Invalid media path.')
                 self.send_file(path)
+            elif parsed.path == '/api/styles':
+                self.json_response(self.studio.list_styles())
+            elif parsed.path == '/api/styles/thumbnail':
+                self.send_file(style_library.folder(self.studio.data, query['id'][0]) / 'thumb.jpg')
             elif parsed.path == '/caption-font.css':
                 self.send_file(ENGINE / 'code/src/font.css')
             elif parsed.path.startswith('/library/'):
@@ -1149,6 +1225,28 @@ class Handler(BaseHTTPRequestHandler):
                 self.json_response({'error': 'Reload the studio page.'}, 403); return
             length = int(self.headers.get('Content-Length', '0'))
             query = parse_qs(parsed.query)
+            if parsed.path == '/api/styles/upload':
+                role = query.get('role', [''])[0]
+                with self.studio.lock:
+                    if query['id'][0] in self.studio.active_styles(): raise ValueError('Wait for this style analysis to finish.')
+                    target = style_library.upload_target(self.studio.data, query['id'][0], role, Path(query['name'][0]).name)
+                if not 0 < length <= 4 * 1024**3: raise ValueError('Use a supported media file, up to 4 GB.')
+                target.parent.mkdir(parents=True, exist_ok=True)
+                pending = target.with_name('.upload-' + uuid.uuid4().hex + target.suffix)
+                try:
+                    with pending.open('wb') as out:
+                        remaining = length
+                        while remaining:
+                            chunk = self.rfile.read(min(1024 * 1024, remaining))
+                            if not chunk: raise ValueError('Upload was interrupted.')
+                            out.write(chunk); remaining -= len(chunk)
+                    style_library.check_upload(role, pending)
+                    with self.studio.lock:
+                        pending.replace(target)
+                        style = style_library.finish_upload(self.studio.data, query['id'][0], role, target)
+                finally: pending.unlink(missing_ok=True)
+                self.json_response({'style': style})
+                return
             if parsed.path == '/api/upload':
                 with self.studio.lock:
                     role = query.get('role', ['media'])[0]
@@ -1248,7 +1346,25 @@ class Handler(BaseHTTPRequestHandler):
                 elif parsed.path == '/api/voice/start':
                     result = self.studio.start_voice(data['id'], data.get('build', False) is True, data.get('force', False) is True)
                 elif parsed.path == '/api/reference/create':
-                    result = self.studio.create_reference(data['name'], data['script'], data.get('instructions', ''), data.get('provider'), data.get('workflow', 'reference'), data.get('idea', ''))
+                    result = self.studio.create_reference(data['name'], data['script'], data.get('instructions', ''), data.get('provider'), data.get('workflow', 'reference'), data.get('idea', ''),
+                                                          data.get('styles') or None, data.get('style_mix'))
+                elif parsed.path == '/api/styles/create':
+                    style = style_library.create(self.studio.data, data.get('name', ''), data.get('provider', 'antigravity'), data.get('model'))
+                    result = {**self.studio.list_styles(), 'style': style}
+                elif parsed.path == '/api/styles/analyze':
+                    result = self.studio.start_style_analysis(data['id'], data.get('provider'), data.get('model'))
+                elif parsed.path == '/api/styles/update':
+                    if data['id'] in self.studio.active_styles(): raise ValueError('Wait for this style analysis to finish.')
+                    style_library.update(self.studio.data, data['id'], data.get('name'), data.get('profile'))
+                    result = self.studio.list_styles()
+                elif parsed.path == '/api/styles/delete':
+                    if data['id'] in self.studio.active_styles(): raise ValueError('Wait for this style analysis to finish.')
+                    style_library.delete(self.studio.data, data['id'], data.get('confirmed') is True)
+                    result = self.studio.list_styles()
+                elif parsed.path == '/api/styles/from-project':
+                    self.studio.idle(data['id'])
+                    style = style_library.from_project(self.studio.data, self.studio.project(data['id']), data.get('name', ''))
+                    result = {**self.studio.list_styles(), 'style': style}
                 elif parsed.path == '/api/reference/flow/approve':
                     result = self.studio.approve_flow_script(data['id'], data['script'])
                 elif parsed.path == '/api/reference/flow/clip':
@@ -1352,7 +1468,7 @@ class StudioServer(ThreadingHTTPServer):
         super().server_bind()
 
 
-def running_studio(url, require_series=False, require_parallel=False, require_analytics=False, require_reference=False, require_codex=False, require_models=False, require_voice=False, require_flow=False, require_pc=False, require_brief=False):
+def running_studio(url, require_series=False, require_parallel=False, require_analytics=False, require_reference=False, require_codex=False, require_models=False, require_voice=False, require_flow=False, require_pc=False, require_brief=False, require_styles=False):
     """Identify this studio without changing its projects or interrupting a job."""
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -1362,6 +1478,7 @@ def running_studio(url, require_series=False, require_parallel=False, require_an
                 and isinstance(data.get('engine'), str) and Path(data['engine']).resolve() == ENGINE
                 and (not require_pc or all(flag in data.get('features', []) for flag in ('pc-tips', 'pc-chatgpt-sign-in', 'pc-auto-ideas', 'pc-visual-modes', 'pc-problem-first', 'pc-google-first')))
                 and (not require_brief or all(flag in data.get('features', []) for flag in ('antigravity-brief-automation', 'antigravity-new-episodes', 'parallel-production')))
+                and (not require_styles or all(flag in data.get('features', []) for flag in ('style-library', 'reference-claude')))
                 and (not require_series or 'ai-series' in data.get('features', []))
                 and (not require_parallel or 'parallel-publishing' in data.get('features', []))
                 and (not require_analytics or 'analytics' in data.get('features', []))
@@ -1399,7 +1516,7 @@ def main():
             server = StudioServer(('127.0.0.1', port), Handler)
             break
         except OSError as error:
-            if running_studio(url, require_series=True, require_parallel=True, require_analytics=True, require_reference=True, require_codex=True, require_models=True, require_voice=True, require_flow=True, require_pc=True, require_brief=True):
+            if running_studio(url, require_series=True, require_parallel=True, require_analytics=True, require_reference=True, require_codex=True, require_models=True, require_voice=True, require_flow=True, require_pc=True, require_brief=True, require_styles=True):
                 print(f'Video Turbo Studio is already running: {url}', flush=True)
                 if not args.no_browser: webbrowser.open(url)
                 return 0
