@@ -311,33 +311,48 @@ def download_youtube(info: dict, start: float, duration: float, dest: Path) -> b
     from yt_dlp.utils import download_range_func
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".download-", dir=dest.parent) as work:
-        pending = Path(work) / "clip.mp4"
-        options = {
-            "format": VIDEO_FORMAT,
-            "outtmpl": str(pending),
-            "noplaylist": True,
-            "quiet": True,
-            "socket_timeout": 30,
-            "download_ranges": download_range_func(None, [(start, start + duration)]),
-            # Re-encode this small section once for accurate, playable H.264 cuts.
-            "force_keyframes_at_cuts": True,
-            "external_downloader_args": {"ffmpeg_o": [
-                "-t", str(duration), "-map", "0:v:0", "-an",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-f", "mp4",
-            ]},
-            "fixup": "never",
-        }
-        options.update(youtube_runtime_options())
-        with yt_dlp.YoutubeDL(options) as ydl:
-            # Reuse freshly resolved stream URLs for both clips; do not extract twice.
-            ydl.process_ie_result(copy.deepcopy(info), download=True)
-        if not clip_is_ready(pending, duration):
-            log("  WARNING: section download is incomplete; it will not be cached.")
-            return False
-        pending.replace(dest)
-    return True
+    source_url = info.get("webpage_url") or info.get("original_url")
+    for attempt in range(3):
+        try:
+            if attempt and source_url:
+                # Stream URLs can expire or fail at one CDN; resolve a fresh one.
+                info = fetch_video_info(source_url)
+            with tempfile.TemporaryDirectory(prefix=".download-", dir=dest.parent) as work:
+                pending = Path(work) / "clip.mp4"
+                options = {
+                    "format": VIDEO_FORMAT,
+                    "outtmpl": str(pending),
+                    "noplaylist": True,
+                    "quiet": True,
+                    "socket_timeout": 30,
+                    "download_ranges": download_range_func(None, [(start, start + duration)]),
+                    "force_keyframes_at_cuts": True,
+                    "external_downloader_args": {
+                        # Keep useful FFmpeg errors even when yt-dlp progress is quiet.
+                        "ffmpeg_i": ["-nostdin", "-loglevel", "error", "-nostats"],
+                        "ffmpeg_o": [
+                            "-t", str(duration), "-map", "0:v:0", "-an",
+                            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                            "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-f", "mp4",
+                        ],
+                    },
+                    "fixup": "never",
+                }
+                options.update(youtube_runtime_options())
+                with yt_dlp.YoutubeDL(options) as ydl:
+                    # Reuse resolved streams on the first attempt and for the second clip.
+                    ydl.process_ie_result(copy.deepcopy(info), download=True)
+                if clip_is_ready(pending, duration):
+                    pending.replace(dest)
+                    return True
+                reason = "section download is incomplete; it will not be cached"
+        except yt_dlp.utils.DownloadError as error:
+            reason = str(error)
+        if attempt < 2:
+            log(f"  WARNING: {reason}. Retrying this section ({attempt + 2}/3) with a fresh stream link.")
+        else:
+            log(f"  ERROR: section download failed after 3 attempts: {reason}")
+    return False
 
 
 def prepare_gameplay(url: str, clip_duration: float, game_dir: Path, info: dict | None = None) -> bool:

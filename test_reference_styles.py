@@ -92,6 +92,18 @@ class ReferenceTests(unittest.TestCase):
             self.assertEqual(diagnostics['tools'][0]['name'],'run_command')
             self.assertTrue(diagnostics['tools'][0]['failed'])
 
+    def test_empty_output_after_search_timeout_is_not_called_a_permission_failure(self):
+        events = [{'event': 'step_update', 'step_update': {'state': 'DONE', 'tool_info': {'name': 'search_web'}}},
+                  {'event': 'result', 'result': {'status': 'SUCCESS', 'response': '', 'conversation_id': 'research', 'duration_seconds': 599.8}}]
+        result = type('Result', (), {'returncode': 0, 'stdout': '\n'.join(json.dumps(row) for row in events), 'stderr': ''})()
+        with tempfile.TemporaryDirectory() as folder, patch.object(ref.subprocess, 'run', return_value=result):
+            with self.assertRaises(ref.AntigravityIncomplete) as caught:
+                ref.ask_antigravity({'cli_path': 'agy.exe', 'model': ref.DEFAULT_MODEL}, folder, 'Research', ref.SCHEMA)
+        self.assertEqual(caught.exception.reason, 'timeout')
+        self.assertIn('time limit', str(caught.exception))
+        self.assertNotIn('permission', str(caught.exception).lower())
+        self.assertNotIn('fallback', str(caught.exception).lower())
+
     def test_google_non_json_output_is_diagnosed_without_guessing_a_plan(self):
         result=type('Result',(),{'returncode':0,'stdout':json.dumps({'event':'result','result':{'status':'SUCCESS','response':'I could not research this.'}}),'stderr':''})()
         with tempfile.TemporaryDirectory() as folder,patch.object(ref.subprocess,'run',return_value=result):
@@ -235,7 +247,7 @@ class ReferenceTests(unittest.TestCase):
             write_json(path/'reference_style.json',{'status':'awaiting_inputs','reference_file':'source.mp4'})
             with patch.object(ref,'settings',return_value={'installed':True}),patch.object(studio.threading,'Thread') as thread:
                 result=app.start_reference(p['id'],False)
-                self.assertEqual(result['job']['action'],'reference_plan');self.assertEqual(thread.call_args.kwargs['target'],app.run)
+                self.assertEqual(result['job']['action'],'reference_plan');self.assertEqual(thread.call_args.kwargs['target'],app._execute_job);self.assertEqual(thread.call_args.kwargs['args'][1],app.run)
                 app.cancel();self.assertEqual(app.job['status'],'cancelling')
 
 class CodexProviderTests(unittest.TestCase):

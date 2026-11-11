@@ -6,6 +6,7 @@
  let seriesList=[],seriesLoaded=false,seriesRequest=null;
  const seriesDrafts = {};
  const phases = {
+  fetching_brief:['Reading your Antigravity conversation','Studio is fetching and validating your JSON brief. Automatic building continues with your saved ElevenLabs voice, gameplay and logos.'],
   awaiting_assets:['Your script and game list are ready','Click Prepare assets, then upload a recording or choose ElevenLabs below. Studio builds when the assets and voiceover are ready.'],
   writing_script:['Writing your script','The script comes first. Assets will wait until you approve it.'],
   awaiting_review:['Your script is ready to review','Edit the spoken script below, then approve it. You can copy or download it for recording.'],
@@ -125,15 +126,18 @@
  function lock(blocked) {
   if(!app) return;
   const state=app.getState();
-  const working=blocked || busy || state.busy || !state.token || ['running','cancelling'].includes(state.job?.status) || state.publishingJob?.status==='running';
+  const base=blocked || busy || state.busy || !state.token || state.publishingJob?.status==='running';
+  const working=base || ['queued','running','cancelling'].includes(state.job?.status);
+  const creating=base;
   const ai=$('new-workflow').value==='ai';
-  $('create-submit').disabled=working || ai && (!settings?.providers?.[$('ai-provider').value]?.configured || Boolean($('ai-series').value) && !seriesLoaded);
-  for(const control of $('create-ai-fields').querySelectorAll('input,textarea,select,button')) control.disabled=working || !ai;
-  $('ai-series').disabled=working || !ai || !seriesLoaded;
-  $('ai-series-new').disabled=working || !ai || !seriesLoaded;
-  $('ai-series-retry').disabled=working || !ai || Boolean(seriesRequest);
+  $('create-submit').disabled=creating || ai && (!settings?.providers?.[$('ai-provider').value]?.configured || Boolean($('ai-series').value) && !seriesLoaded);
+  for(const control of $('create-ai-fields').querySelectorAll('input,textarea,select,button')) control.disabled=creating || !ai;
+  $('ai-series').disabled=creating || !ai || !seriesLoaded;
+  $('ai-series-new').disabled=creating || !ai || !seriesLoaded;
+  $('ai-series-retry').disabled=creating || !ai || Boolean(seriesRequest);
   for(const id of ['ai-approve','ai-retry','ai-prepare-assets']) $(id).disabled=working;
   for(const id of ['ai-copy-script','ai-download-script']) $(id).disabled=!state.project?.editor?.script;
+  for(const id of ['new-name','new-workflow','new-voice-source','create-project','close-dialog']){const element=$(id);if(element)element.disabled=!state.token || state.busy || busy;}
   $('close-dialog').disabled=busy;
  }
  function update(project) {
@@ -142,15 +146,16 @@
   if($('ai-workflow').hidden) return;
   const imported=workflow.source==='import';
   const changed=Boolean(workflow.approved_script && workflow.approved_script!==$('script').value.trim()) || imported && app.getState().dirty;
-  $('ai-workflow-heading').textContent=imported ? 'Prepare assets and your voiceover.' : 'Script first. Your voice next.';
+  $('ai-workflow-heading').textContent=workflow.conversation_id ? 'From Antigravity to your video.' : imported ? 'Prepare assets and your voiceover.' : 'Script first. Your voice next.';
   const [title,note]=phases[changed?(imported?'awaiting_assets':'awaiting_review'):workflow.status] || ['AI workflow','Review your script before recording.'];
-  $('ai-workflow-status').textContent=title; $('ai-workflow-note').textContent=note;
+  const generating=workflow.episode_mode==='new' && workflow.status==='fetching_brief';
+  $('ai-workflow-status').textContent=generating?'Writing your next episode with Antigravity':title; $('ai-workflow-note').textContent=generating?'Studio is writing a fresh script and researching sources using your series history. Voiceover, assets and rendering follow automatically when requested.':workflow.conversation_id && workflow.build_video && workflow.status==='rendering' ? 'Studio is generating narration, preparing gameplay and logos, aligning captions and rendering your MP4.' : note;
   const review=workflow.status==='awaiting_review' || changed;
   $('ai-approve').hidden=imported || !review || !workflow.outline;
   $('ai-prepare-assets').hidden=!imported || !changed && !['awaiting_assets','assets_ready','complete'].includes(workflow.status);
   $('ai-prepare-assets').textContent=['assets_ready','complete'].includes(workflow.status) && !changed ? 'Prepare assets again' : 'Prepare assets';
   $('ai-retry').hidden=!['failed','cancelled','interrupted'].includes(workflow.status) || changed;
-  $('ai-retry').textContent=workflow.approved_script_hash ? (project.editor.mode==='games' && ['build','preview'].includes(workflow.failed_step) ? 'Retry video build' : 'Retry asset preparation') : 'Retry script generation';
+  $('ai-retry').textContent=workflow.failed_step==='brief_import' ? 'Retry Antigravity import' : workflow.approved_script_hash ? (project.editor.mode==='games' && ['build','preview'].includes(workflow.failed_step) ? 'Retry video build' : 'Retry asset preparation') : 'Retry script generation';
   $('ai-download-brief').hidden=imported || !['preparing_assets','assets_ready','rendering','complete'].includes(workflow.status) || project.editor.mode!=='games';
   $('ai-workflow-error').textContent=workflow.error || ''; $('ai-workflow-error').hidden=!workflow.error;
   $('ai-workflow-series').textContent=workflow.series_context ? 'Series: '+workflow.series_context.name : '';
@@ -213,6 +218,7 @@
  });
  $('ai-retry').onclick=()=>action(async()=>{
   const state=app.getState();
+  if(state.project.ai_workflow.failed_step==='brief_import') {await apply(await app.api('/api/ai/retry',{id:state.project.id}));return;}
   if(state.project.editor.mode==='games' && state.project.ai_workflow.approved_script_hash && ['build','preview'].includes(state.project.ai_workflow.failed_step)) {
    await app.save();state.job=await app.api('/api/start',{id:state.project.id,action:'build'});app.showJob();return;
   }

@@ -24,9 +24,10 @@
  function error(message) { $('pc-create-error').textContent=message||'';$('pc-create-error').hidden=!message; }
  function lock(blocked=false) {
   if(!app)return;
-  const state=app.getState(),working=blocked||busy||state.busy||!state.token||['running','cancelling'].includes(state.job?.status)||state.publishingJob?.status==='running';
-  for(const control of $('pc-dialog').querySelectorAll('button,input,textarea,select'))control.disabled=working;
-  $('pc-new').disabled=working;
+  const state=app.getState(),working=blocked||busy||state.busy||!state.token||['queued','running','cancelling'].includes(state.job?.status)||state.publishingJob?.status==='running';
+  const creating=blocked||busy||state.busy||!state.token||state.publishingJob?.status==='running';
+  for(const control of $('pc-dialog').querySelectorAll('button,input,textarea,select'))control.disabled=creating;
+  $('pc-new').disabled=creating;
   for(const control of $('pc-panel').querySelectorAll('button,input,select'))control.disabled=working;
   const p=state.project;
   $('pc-copy-script').disabled=$('pc-download-script').disabled=working||!p?.editor.script;

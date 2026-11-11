@@ -46,7 +46,7 @@
  }
  function lock(blocked){
   if(!app)return;
-  const state=app.getState(),busy=blocked || working || state.busy || !state.token || ['running','cancelling'].includes(state.job?.status) || state.publishingJob?.status==='running';
+  const state=app.getState(),busy=blocked || working || state.busy || !state.token || ['queued','running','cancelling'].includes(state.job?.status) || state.publishingJob?.status==='running';
   const config=chosen(),model=catalog?.models.find(row=>row.id===config.model_id),voice=catalog?.voices.find(row=>row.id===config.voice_id);
   const wf=state.project?.ai_workflow;
   const unapproved=wf && Object.keys(wf).length && wf.source!=='import' && (!wf.approved_script_hash || ['writing_script','awaiting_review'].includes(wf.status));

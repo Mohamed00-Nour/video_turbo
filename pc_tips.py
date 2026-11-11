@@ -637,10 +637,25 @@ def prepare(project, data):
     save_state(project, saved, 'ready', voice_signature=voice_signature(project), needs_voice_upload=False)
 
 
+def stamp_review_frame(path, seconds, index):
+    from PIL import Image, ImageDraw, ImageFont
+    with Image.open(path) as source:
+        frame = source.convert('RGB')
+    # Keep the extracted video pixels below a separate review-only metadata band.
+    proof = Image.new('RGB', (frame.width, frame.height + 56), '#101820')
+    proof.paste(frame, (0, 56))
+    draw = ImageDraw.Draw(proof)
+    font = ImageFont.truetype(str(ENGINE / 'fonts/Lalezar-Regular.ttf'), 24)
+    draw.text((12, 1), f'VIDEO TIME {seconds:.3f}s | REVIEW FRAME {index + 1:02d}', font=font, fill='white')
+    draw.text((12, 28), 'Extraction metadata - not part of the video', font=font, fill='#a8d5ef')
+    proof.save(path, 'JPEG', quality=95)
+
+
 def quality_check(project, data, saved, info):
     output = Path(project) / 'output'
     final = output / 'final.mp4'
-    signature = fingerprint({'script': saved['script_hash'], 'size': final.stat().st_size, 'mtime': final.stat().st_mtime_ns})
+    signature = fingerprint({'review_policy': 'timestamped-scenes-v2', 'script': saved['script_hash'],
+                             'size': final.stat().st_size, 'mtime': final.stat().st_mtime_ns})
     if saved.get('quality_check', {}).get('signature') == signature and saved['quality_check'].get('passed'): return
     prompt = ('Review these ordered sampled frames from a PC tutorial. Check readable title/captions, '
               'correct episode number, visible real screen demonstration, and consistency with this plan. '
@@ -654,7 +669,13 @@ def quality_check(project, data, saved, info):
         prompt += (' These clips are explicitly labeled instructional illustrations, not a live desktop recording. '
                    'Evaluate the illustrated settings path and toggle against the documented plan; do not require live '
                    'mouse capture. The illustration label must be visible. Only claim visible evidence.')
-        from pc_tips_walkthrough import PERFORMANCE_TOPIC
+        from pc_tips_walkthrough import PERFORMANCE_TOPIC, TASKBAR_TOPIC
+        if saved['plan'].get('topic_key') == TASKBAR_TOPIC:
+            prompt += (' Compare the taskbar and pointer in the opening and final desktop samples. '
+                       'The opening must show the pointer leaving the taskbar and the bar hidden afterward. '
+                       'The final samples must show the same pointer movement with the taskbar fully visible '
+                       'afterward, including samples at least three seconds apart. A toggle or text note alone '
+                       'is insufficient. Judge only these sampled states, not unseen motion between them.')
         if saved['plan'].get('topic_key') == PERFORMANCE_TOPIC:
             prompt += (' Compare the same Start menu before and after: the initial background must visibly '
                        'transmit blurred desktop colors and the final background must be opaque with no acrylic blur. '
@@ -662,9 +683,10 @@ def quality_check(project, data, saved, info):
                        'GPU-intensive effect itself; reject invented measurements or guaranteed speed gains.')
     images = []
     samples = [min(.8, info['duration'] / 5), info['duration'] * .4, info['duration'] * .8]
+    timeline = read_cache(output / 'timeline.json')
+    demos = [block for block in timeline.get('blocks', []) if block.get('layout') == 'pc_demo']
+    fps = timeline.get('fps', 30)
     if saved['plan'].get('problem'):
-        timeline = read_cache(output / 'timeline.json')
-        demos = [block for block in timeline.get('blocks', []) if block.get('layout') == 'pc_demo']
         if demos:
             first = demos[0]; fps = timeline.get('fps', 30)
             offset = first['durationFrames']/fps*.75 if saved.get('visual_source') == 'illustrated' or len(saved.get('recordings', [])) > 1 else 1.8
@@ -672,12 +694,38 @@ def quality_check(project, data, saved, info):
             if saved['plan'].get('topic_key') == 'windows10-disable-transparency-effects':
                 last = demos[-1]
                 samples.append(min(info['duration']-.1, (last['startFrame'] + last['durationFrames']*.75)/fps))
+            if saved['plan'].get('topic_key') == 'windows10-taskbar-disable-auto-hide':
+                first, last = demos[0], demos[-1]
+                samples.extend([first['startFrame']/fps + .1, last['startFrame']/fps + .1,
+                                last['startFrame']/fps + 1.3,
+                                (last['startFrame'] + last['durationFrames'])/fps - .1])
+                samples = sorted({max(0, min(info['duration']-.1, value)) for value in samples})
+    storyboard = read_cache(Path(project) / 'media/pc-tips/walkthrough.json')
+    steps_by_file = {step.get('file'): step for step in storyboard.get('steps', [])}
+    for block in demos:
+        media = block.get('media') or {}
+        step = steps_by_file.get(Path(media.get('src', '')).name, {}) if isinstance(media, dict) else {}
+        count = len(step.get('scenes') or [None]) if saved.get('visual_source') == 'illustrated' else 1
+        # PcTipsScene fits the whole source clip to its narration block; map every scene's result accordingly.
+        samples.extend((block['startFrame'] + block['durationFrames'] * (scene + .8) / count) / fps
+                       for scene in range(count))
+    samples = sorted({max(0, min(info['duration']-.1, value)) for value in samples})
+    evidence = []
     for index, seconds in enumerate(samples):
         frame = output / f'pc-check-{index}.jpg'
-        result = subprocess.run(['ffmpeg', '-y', '-v', 'error', '-ss', str(seconds), '-i', str(final), '-frames:v', '1', '-vf', 'scale=540:960', str(frame)],
+        result = subprocess.run(['ffmpeg', '-y', '-v', 'error', '-ss', str(seconds), '-i', str(final), '-frames:v', '1', '-vf', 'scale=720:1280', str(frame)],
                                 capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
         if result.returncode or not frame.is_file(): raise ValueError('Could not extract video frames for quality review.')
+        stamp_review_frame(frame, seconds, index)
         images.append(frame)
+        evidence.append({'image': frame.name, 'video_seconds': round(seconds, 6)})
+    write_json(output / 'pc-review-frames.json', {'video': 'final.mp4', 'frames': evidence})
+    prompt += (' The top band on each attachment is review-only extraction metadata, added outside the video '
+               'pixels. It records the timestamp used to extract that frame from final.mp4. Use these timestamps '
+               'to compare elapsed time between sampled states, including the three-second result hold; do not '
+               'expect a timer within the tutorial UI or infer unseen intermediate frames. '
+               'Every illustrated scene has a result sample, including the central settings toggle. '
+               'Attachment order and extraction times: ' + json.dumps(evidence))
     report = pc_tips_ai.ask(data, project, prompt,
                            object_schema({'passed': {'type': 'boolean'}, 'issues': {'type': 'array', 'items': {'type': 'string'}}}),
                            model=saved['script_model'], images=images, stage='Final visual review',

@@ -40,3 +40,6 @@ Thumbs.db
 # Local standalone video projects
 /code/french-hackers/
 /code/promo/
+
+# Per-project renderer snapshots
+.studio-renders/

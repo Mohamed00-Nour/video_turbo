@@ -29,6 +29,7 @@ from analytics import Analytics
 from ai_generation import AIGenerator
 from ai_series import SeriesLibrary
 import reference_styles
+import antigravity_brief
 import flow_workflow
 import voice_generation
 import pc_tips
@@ -48,35 +49,111 @@ class Studio:
         self.presets = read_cache(self.data / 'studio_presets.json')
         self.lock = threading.RLock()
         self.job = None
-        self.process = None
+        self.processes = {}
+        self.jobs = {}
+        self.pending = []
+        self.workers = {}
+        self.max_parallel = 2
+        self.stopping = False
         self.token = secrets.token_urlsafe(32)
         self.publisher = Publisher(self.data, self.project)
         self.analytics = Analytics(self.data, self.publisher, self.analytics_projects)
         self.ai = AIGenerator(self.data)
         self.voice = voice_generation.ElevenLabs(self.data)
         self.series = SeriesLibrary(self.data)
-        saved_job = read_cache(self.data / 'ai' / 'job.json')
-        if saved_job:
+        saved = read_cache(self.data / 'ai/jobs.json')
+        self.max_parallel = saved.get('max_parallel', 2)
+        if not isinstance(self.max_parallel, int) or not 1 <= self.max_parallel <= 4: self.max_parallel = 2
+        records = saved.get('jobs', []) or [read_cache(self.data / 'ai/job.json')]
+        for saved_job in records:
+            if not saved_job: continue
+            saved_job.setdefault('id', uuid.uuid4().hex)
+            self.jobs[saved_job['id']] = saved_job
             self.job = saved_job
-            if saved_job.get('status') in ('running', 'cancelling'):
-                saved_job.update(status='interrupted', stage='AI workflow interrupted', finished=time.time(),
-                                 error='Studio restarted. Your script is saved; retry the interrupted step.')
+            if saved_job.get('status') in ('queued', 'running', 'cancelling'):
+                saved_job.update(status='interrupted', stage='Production interrupted', finished=time.time(),
+                                 error='Studio restarted. Your files are saved; retry the interrupted step.')
                 if saved_job.get('project') in self.registry:
                     project = self.project(saved_job['project'])
                     action = saved_job.get('next_action', saved_job.get('action', ''))
-                    if action.startswith('pc_'):
-                        path = project / 'pc_tips.json'
-                    elif action.startswith('reference_'):
-                        path = project / 'reference_style.json'
-                    elif not saved_job.get('action', '').startswith('voice_'):
-                        path = project / 'ai_workflow.json'
-                    else:
-                        path = None
-                    if path:
+                    filename = 'pc_tips.json' if action.startswith('pc_') else 'reference_style.json' if action.startswith('reference_') else 'ai_workflow.json'
+                    path = project / filename
+                    if path.is_file():
                         workflow = read_cache(path)
                         workflow.update(status='interrupted', error=saved_job['error'])
                         write_json(path, workflow)
-                write_json(self.data / 'ai' / 'job.json', saved_job)
+        if self.job: self.persist_jobs()
+
+    def all_jobs(self):
+        jobs = dict(self.jobs)
+        if self.job: jobs[self.job.get('id', 'legacy')] = self.job
+        return list(jobs.values())
+
+    def project_job(self, identifier):
+        return next((job for job in reversed(self.all_jobs()) if job.get('project') == identifier
+                     and job.get('status') in ('queued', 'running', 'cancelling')), None)
+
+    def persist_jobs(self):
+        jobs = self.all_jobs()
+        write_json(self.data / 'ai/jobs.json', {'max_parallel': self.max_parallel, 'jobs': jobs})
+        write_json(self.data / 'ai/job.json', self.job or {})
+
+    def production_state(self):
+        with self.lock:
+            return {'jobs': copy.deepcopy(self.all_jobs()), 'max_parallel': self.max_parallel}
+
+    def configure_production(self, value):
+        with self.lock:
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4:
+                raise ValueError('Choose 1 to 4 simultaneous videos.')
+            self.max_parallel = value
+            self.persist_jobs(); self._dispatch_jobs()
+            return self.production_state()
+
+    def enqueue(self, job, target, *args):
+        with self.lock:
+            job['status'] = 'queued'
+            job['queued_at'] = time.time()
+            self.pending.append((job, target, args))
+            self._dispatch_jobs(); self.persist_jobs()
+
+    def _dispatch_jobs(self):
+        if self.stopping: return
+        while self.pending and sum(job.get('status') in ('running', 'cancelling') for job in self.all_jobs()) < self.max_parallel:
+            job, target, args = self.pending.pop(0)
+            if job.get('cancel'): continue
+            job.update(status='running', started=time.time())
+            worker = threading.Thread(target=self._execute_job, args=(job, target, args), daemon=True)
+            self.workers[job['id']] = worker
+            worker.start()
+
+    def _execute_job(self, job, target, args):
+        try:
+            target(job, *args)
+        except Exception:
+            with self.lock:
+                job.update(status='cancelled' if job.get('cancel') else 'failed', stage='Production failed', error='Production failed. Your project is saved; retry its step.')
+                path = self.project(job['project'])
+                action = job.get('next_action', job['action'])
+                filename = 'pc_tips.json' if action.startswith('pc_') else 'reference_style.json' if action.startswith('reference_') else 'ai_workflow.json'
+                if (path / filename).is_file():
+                    workflow = read_cache(path / filename)
+                    workflow.update(status=job['status'], failed_step=action, error=job['error'])
+                    write_json(path / filename, workflow)
+        finally:
+            with self.lock:
+                job['finished'] = time.time()
+                self.persist_jobs(); self._dispatch_jobs()
+                self.workers.pop(job['id'], None)
+
+    def shutdown_jobs(self):
+        with self.lock:
+            self.stopping = True
+            for job in self.all_jobs():
+                if job.get('status') in ('queued', 'running'): self.cancel(job['id'])
+            workers = list(self.workers.values())
+        for worker in workers:
+            if worker is not threading.current_thread(): worker.join(timeout=5)
 
 
     def analytics_projects(self):
@@ -91,11 +168,13 @@ class Studio:
             raise ValueError('Project not found.')
         return Path(self.registry[identifier]['path']).resolve()
 
-    def idle(self, allow_publishing=False):
+    def idle(self, identifier=None, allow_publishing=False):
         if not allow_publishing and self.publisher.running:
             raise ValueError('Wait for the publishing upload to finish before changing the video project.')
-        if self.job and self.job['status'] in ('running', 'cancelling'):
-            raise ValueError('Wait for the current job or cancel it before making changes.')
+        # Unregistered legacy jobs have no project scope; managed jobs protect only their project.
+        legacy = self.job and self.job.get('id') not in self.jobs and self.job.get('status') in ('running', 'cancelling')
+        if legacy or identifier and self.project_job(identifier):
+            raise ValueError('Wait for the current job for this project or cancel it before making changes.')
 
     def register(self, path):
         path = Path(path).resolve()
@@ -112,7 +191,7 @@ class Studio:
 
     def rename_project(self, identifier, name):
         with self.lock:
-            self.idle()
+            self.idle(identifier)
             if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80:
                 raise ValueError('Project name must contain 1 to 80 characters.')
             path = self.project(identifier)
@@ -128,7 +207,7 @@ class Studio:
 
     def delete_project(self, identifier, confirmed=False):
         with self.lock:
-            self.idle()
+            self.idle(identifier)
             if confirmed is not True: raise ValueError('Confirm deletion before deleting the project.')
             path = self.project(identifier)
             trash = None
@@ -145,6 +224,8 @@ class Studio:
             if self.job and self.job.get('project') == identifier:
                 self.job = None
                 write_json(self.data / 'ai' / 'job.json', {})
+            self.jobs = {key: job for key, job in self.jobs.items() if job.get('project') != identifier}
+            self.persist_jobs()
             return {'deleted': identifier, 'files_moved': bool(trash)}
 
     def create(self, name, preset='blank'):
@@ -201,7 +282,7 @@ class Studio:
 
     def start_pc_tips(self, identifier, recording_mode=None, add_problem=False):
         with self.lock:
-            self.idle()
+            self.idle(identifier)
             path = self.project(identifier)
             saved = pc_tips.state(path)
             if not saved: raise ValueError('Create a PC Tips & Tricks episode first.')
@@ -215,7 +296,7 @@ class Studio:
             drafting = not saved.get('plan')
             pc_tips.save_state(path, saved, 'writing_script' if drafting else 'preparing', error='')
             job = self._ai_job(identifier, 'pc_draft' if drafting else 'pc_problem' if add_problem and not saved['plan'].get('problem') else 'pc_produce', 'Writing PC tutorial' if drafting else 'Preparing PC tutorial')
-            threading.Thread(target=self.run, args=(job, path, read_cache(path / 'config.json'), 0), daemon=True).start()
+            self.enqueue(job, self.run, path, read_cache(path / 'config.json'), 0)
             return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
 
     def create_reference(self, name, script, instructions='', provider=None, workflow='reference', idea=''):
@@ -237,7 +318,7 @@ class Studio:
         return self.load(identifier)
 
     def approve_flow_script(self, identifier, script):
-        self.idle()
+        self.idle(identifier)
         path = self.project(identifier)
         state = read_cache(path / 'reference_style.json')
         if state.get('workflow') != 'flow' or state.get('status') != 'script_review': raise ValueError('Generate a Flow script draft first.')
@@ -267,12 +348,12 @@ class Studio:
             state['flow_scenes'] = [{**row, 'image_prompt': flow_workflow.prompt_for(state['flow_plan'], row, 'image'),
                                     'motion_prompt': flow_workflow.prompt_for(state['flow_plan'], row, 'motion')}
                                    for row in flow_workflow.scene_rows(state['flow_plan'])]
-        if state.get('status') == 'analyzing' and not (self.job and self.job.get('project') == identifier and self.job.get('status') in ('running','cancelling')):
+        if state.get('status') == 'analyzing' and not self.project_job(identifier):
             state.update(status='interrupted', error='Analysis was interrupted. Your files are saved; retry analysis.')
         return state
 
     def save_voice(self, identifier, settings):
-        self.idle()
+        self.idle(identifier)
         path = self.project(identifier)
         saved = read_cache(path / 'voiceover.json')
         saved.update(voice_generation.options(settings))
@@ -281,7 +362,7 @@ class Studio:
 
     def start_voice(self, identifier, build=False, force=False, continuation=''):
         with self.lock:
-            self.idle()
+            self.idle(identifier)
             path = self.project(identifier)
             if build and pc_tips.state(path): return self.start_pc_tips(identifier)
             selected = voice_generation.options(voice_generation.project_state(path))
@@ -316,12 +397,12 @@ class Studio:
                     workflow.update(approved_script=script, approved_script_hash=fingerprint(script), prepared_inputs_hash=self.asset_inputs_hash(editor))
                 workflow.update(status='rendering', error='')
                 write_json(path / 'ai_workflow.json', workflow)
-            threading.Thread(target=self.run, args=(job, path, config, 0), daemon=True).start()
+            self.enqueue(job, self.run, path, config, 0)
             return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
 
     def start_reference(self, identifier, build=True, provider=None):
         with self.lock:
-            self.idle()
+            self.idle(identifier)
             path = self.project(identifier)
             state = self.reference_state(identifier)
             if not state: raise ValueError('Create a Reference Styles project first.')
@@ -349,7 +430,7 @@ class Studio:
             state.pop('stale', None)
             write_json(path / 'reference_style.json', state)
             job = self._ai_job(identifier, 'reference_build' if build else 'reference_plan', 'Analyzing reference with ' + reference_styles.PROVIDER_NAMES[provider])
-            threading.Thread(target=self.run, args=(job, path, read_cache(path / 'config.json'), 0), daemon=True).start()
+            self.enqueue(job, self.run, path, read_cache(path / 'config.json'), 0)
             return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
 
     def import_brief(self, raw):
@@ -364,6 +445,99 @@ class Studio:
         write_json(config_path, config)
         write_json(self.project(identifier) / 'ai_workflow.json', self.workflow(identifier))
         return self.load(identifier)
+
+    def start_brief_automation(self, conversation_id, request='', build=True, identifier='', episode_mode='new'):
+        with self.lock:
+            self.idle(identifier)
+            conversation_id, request = antigravity_brief.inputs(conversation_id, request)
+            episode_mode = antigravity_brief.episode_mode(episode_mode)
+            if not isinstance(build, bool): raise ValueError('Choose import only or import and build.')
+            if not reference_styles.settings(self.data)['providers']['antigravity']['installed'] and (episode_mode == 'new' or not antigravity_brief.transcript_path(conversation_id).is_file()):
+                raise ValueError('Connect the local Antigravity CLI before importing a conversation.')
+            if identifier:
+                previous = self.workflow(identifier)
+                if previous.get('source') != 'import' or previous.get('failed_step') != 'brief_import':
+                    raise ValueError('Only an interrupted Antigravity import can be resumed here.')
+                selected = voice_generation.options(voice_generation.project_state(self.project(identifier)))
+            else:
+                selected = voice_generation.options(self.voice.snapshot()['defaults'])
+            if build:
+                selected['source'] = 'elevenlabs'
+                if not self.voice.snapshot()['configured'] or not selected['voice_id'] or not selected['model_id']:
+                    raise ValueError('Save a default ElevenLabs voice and speech model in Voice settings before automatic building. You can still import without building.')
+            if not identifier: identifier = self.create('Antigravity video', 'games')
+            path = self.project(identifier)
+            write_json(path / 'voiceover.json', selected)
+            write_json(self.data / 'brief_automation/settings.json', {'conversation_id': conversation_id, 'request': request})
+            write_json(path / 'ai_workflow.json', {
+                'source': 'import', 'status': 'fetching_brief', 'conversation_id': conversation_id,
+                'brief_request': request, 'episode_mode': episode_mode, 'build_video': build, 'auto_build': build,
+                'failed_step': 'brief_import', 'error': ''})
+            job = self._ai_job(identifier, 'brief_import', 'Generating the next Antigravity episode' if episode_mode == 'new' else 'Reading latest Antigravity brief')
+            self.enqueue(job, self.run_brief_automation, path)
+            return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
+
+    def run_brief_automation(self, job, path):
+        delegated = False
+        process = None
+        try:
+            with self.lock:
+                if job['cancel']: return
+                process = subprocess.Popen([sys.executable, '-u', str(ENGINE / 'antigravity_brief.py'),
+                    '--project', str(path), '--data', str(self.data)], cwd=ENGINE,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace',
+                    env={**os.environ, 'PYTHONIOENCODING': 'utf-8', 'PYTHONUNBUFFERED': '1'},
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+                self.processes[job['id']] = process
+            message = ''
+            for line in process.stdout:
+                line = line.strip()
+                if not line: continue
+                with self.lock:
+                    job['logs'] = (job['logs'] + [line])[-600:]
+                    if line.startswith('[BRIEF] '): job['stage'] = line[8:]
+                    if line.startswith('[BRIEF ERROR] '): message = line[14:]
+            code = process.wait()
+            with self.lock:
+                self.processes.pop(job['id'], None)
+                if job['cancel']: return
+                if code: raise ValueError(message or 'Antigravity import failed. Check the job log and retry.')
+                brief = read_cache(path / 'ai_brief.json')
+                parsed = parse_brief(brief)
+                identifier = job['project']
+                self.save(identifier, parsed['editor'], job_id=job['id'])
+                self.registry[identifier]['name'] = parsed['editor']['name']; self.persist()
+                config = read_cache(path / 'config.json'); config['brief_sources'] = True
+                write_json(path / 'config.json', config)
+                workflow = self.workflow(identifier)
+                workflow.update(status='awaiting_assets', warnings=parsed['warnings'], failed_step='', error='')
+                if workflow['build_video']:
+                    workflow.update(status='rendering', approved_script=parsed['editor']['script'],
+                        approved_script_hash=fingerprint(parsed['editor']['script']),
+                        prepared_inputs_hash=self.asset_inputs_hash(parsed['editor']))
+                    job.update(next_action='build', generate_voice=True, stage='Preparing voiceover and video', progress=5)
+                else:
+                    job.update(status='complete', stage='Brief imported; ready to edit', progress=100)
+                write_json(path / 'ai_workflow.json', workflow)
+            if workflow['build_video']:
+                delegated = True
+                self.run(job, path, config, 0)
+        except Exception as error:
+            with self.lock:
+                job.update(status='failed', stage='Antigravity import failed',
+                    error=str(error) if isinstance(error, ValueError) else 'Antigravity import failed. Your project is saved; retry the import.')
+        finally:
+            if process and process.stdout: process.stdout.close()
+            if not delegated:
+                with self.lock:
+                    self.processes.pop(job['id'], None)
+                    if job['cancel']: job.update(status='cancelled', stage='Cancelled', error='')
+                    if job['status'] in ('failed', 'cancelled'):
+                        workflow = self.workflow(job['project'])
+                        workflow.update(status=job['status'], failed_step='brief_import', error=job.get('error', ''))
+                        write_json(path / 'ai_workflow.json', workflow)
+                    job['finished'] = time.time()
+                    self.persist_jobs()
 
     def list_projects(self):
         # Discover existing video folders without modifying their contents.
@@ -412,8 +586,8 @@ class Studio:
 
     def save(self, identifier, editor, *, job_id=None):
         if job_id is None:
-            self.idle()
-        elif not self.job or self.job.get('id') != job_id or self.job.get('project') != identifier or self.job.get('status') != 'running':
+            self.idle(identifier)
+        elif not any(job.get('id') == job_id and job.get('project') == identifier and job.get('status') == 'running' for job in self.all_jobs()):
             raise ValueError('The AI generation job changed; reload the project.')
         path = self.project(identifier)
         if not isinstance(editor, dict) or editor.get('mode') not in ('sections', 'games'):
@@ -508,7 +682,7 @@ class Studio:
 
     def prepare_imported_assets(self, identifier):
         with self.lock:
-            self.idle()
+            self.idle(identifier)
             workflow = self.workflow(identifier)
             editor = self.load(identifier)['editor']
             if workflow.get('source') != 'import' or editor['mode'] != 'games':
@@ -521,14 +695,15 @@ class Studio:
                             prepared_inputs_hash=self.asset_inputs_hash(editor), auto_build=True, failed_step='', error='')
             write_json(path / 'ai_workflow.json', workflow)
             job = self._ai_job(identifier, 'ai_prepare', 'Preparing gameplay and logos')
-            threading.Thread(target=self.run, args=(job, path, read_cache(path / 'config.json'), 0), daemon=True).start()
+            self.enqueue(job, self.run, path, read_cache(path / 'config.json'), 0)
             return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
 
     def _ai_job(self, identifier, action, stage):
-        job = {'id': uuid.uuid4().hex, 'project': identifier, 'action': action, 'status': 'running',
+        job = {'id': uuid.uuid4().hex, 'project': identifier, 'action': action, 'status': 'queued',
                'stage': stage, 'progress': 0, 'logs': [], 'started': time.time(), 'cancel': False}
         self.job = job
-        write_json(self.data / 'ai' / 'job.json', job)
+        self.jobs[job['id']] = job
+        self.persist_jobs()
         return job
 
     def create_ai(self, name, provider, idea, language, series_id=''):
@@ -545,25 +720,28 @@ class Studio:
         if context: workflow.update(series_id=series_id, series_context=context)
         write_json(self.project(identifier) / 'ai_workflow.json', workflow)
         job = self._ai_job(identifier, 'ai_script', 'Writing your script')
-        threading.Thread(target=self.run_ai, args=(job, account), daemon=True).start()
+        self.enqueue(job, self.run_ai, account)
         return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
 
     def retry_ai(self, identifier):
-        self.idle()
+        self.idle(identifier)
         workflow = self.workflow(identifier)
         if not workflow or workflow.get('status') not in ('failed','cancelled','interrupted'): raise ValueError('There is no failed AI step to retry.')
-        if workflow.get('source') == 'import': return self.prepare_imported_assets(identifier)
+        if workflow.get('source') == 'import':
+            if workflow.get('failed_step') == 'brief_import':
+                return self.start_brief_automation(workflow['conversation_id'], workflow.get('brief_request', ''), workflow.get('build_video', False), identifier, episode_mode=workflow.get('episode_mode', 'new'))
+            return self.prepare_imported_assets(identifier)
         account = self.ai.account(workflow['provider'])
         if workflow.get('approved_script_hash'):
             return self.approve_ai(identifier, self.load(identifier)['editor']['script'], True)
         workflow.update(status='writing_script', model=account['model'], error='')
         write_json(self.project(identifier) / 'ai_workflow.json', workflow)
         job = self._ai_job(identifier, 'ai_script', 'Writing your script')
-        threading.Thread(target=self.run_ai, args=(job, account), daemon=True).start()
+        self.enqueue(job, self.run_ai, account)
         return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
 
     def approve_ai(self, identifier, script, approved=False):
-        self.idle()
+        self.idle(identifier)
         workflow = self.workflow(identifier)
         if approved is not True: raise ValueError('Review and approve the script before preparing assets.')
         if not workflow.get('outline'): raise ValueError('Generate a script before approving it.')
@@ -579,7 +757,7 @@ class Studio:
             self.series.record_approval(workflow['series_id'], identifier, editor['name'], workflow['idea'], script.strip(),
                                         [game['exact_name'] for game in workflow['outline']['games']])
         job = self._ai_job(identifier, 'ai_prepare', 'Finding gameplay and logos')
-        threading.Thread(target=self.run_ai, args=(job, account), daemon=True).start()
+        self.enqueue(job, self.run_ai, account)
         return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
 
     def run_ai(self, job, account):
@@ -630,14 +808,14 @@ class Studio:
                     job.update(status='cancelled', stage='Cancelled')
                     workflow.update(status='cancelled', error=''); write_json(path / 'ai_workflow.json', workflow)
                 job['finished'] = time.time()
-                if self.job is job: write_json(self.data / 'ai' / 'job.json', job)
+                self.persist_jobs()
 
     def maybe_auto_build(self, identifier):
         with self.lock:
             tutorial = pc_tips.state(self.project(identifier))
             if tutorial:
                 if tutorial.get('status') not in ('awaiting_voice', 'awaiting_recording', 'awaiting_runner'): return
-                if self.publisher.running or self.job and self.job.get('status') in ('running','cancelling'): return
+                if self.publisher.running or self.project_job(identifier): return
                 if not tutorial.get('plan') or tutorial.get('stale'): return
                 if tutorial.get('status') == 'awaiting_voice':
                     try: voiceover_path(self.project(identifier))
@@ -647,7 +825,7 @@ class Studio:
                 return
             workflow = self.workflow(identifier)
             if workflow.get('status') != 'assets_ready' or not workflow.get('auto_build'): return
-            if self.publisher.running or self.job and self.job.get('status') in ('running','cancelling'): return
+            if self.publisher.running or self.project_job(identifier): return
             selected_voice = voice_generation.project_state(self.project(identifier))
             if selected_voice['source'] == 'elevenlabs' and (not self.voice.snapshot()['configured'] or not selected_voice.get('voice_id') or not selected_voice.get('model_id')): return
             if selected_voice['source'] != 'elevenlabs':
@@ -660,7 +838,7 @@ class Studio:
 
     def start(self, identifier, action, at=0):
         with self.lock:
-            self.idle()
+            self.idle(identifier)
             if action == 'build' and pc_tips.state(self.project(identifier)):
                 return self.start_pc_tips(identifier)['job']
             if action not in ('build', 'preview'):
@@ -686,9 +864,10 @@ class Studio:
             at = float(at)
             if not math.isfinite(at) or at < 0:
                 raise ValueError('Choose a valid preview time.')
-            job = {'id': uuid.uuid4().hex, 'project': identifier, 'action': action, 'status': 'running',
+            job = {'id': uuid.uuid4().hex, 'project': identifier, 'action': action, 'status': 'queued',
                    'stage': 'Starting', 'progress': 0, 'logs': [], 'started': time.time(), 'cancel': False}
             self.job = job
+            self.jobs[job['id']] = job
             if workflow and action == 'build':
                 if workflow.get('source') == 'import':
                     editor = self.load(identifier)['editor']
@@ -696,7 +875,7 @@ class Studio:
                                     prepared_inputs_hash=self.asset_inputs_hash(editor))
                 workflow.update(status='rendering', error=''); write_json(path / 'ai_workflow.json', workflow)
                 write_json(self.data / 'ai' / 'job.json', job)
-            threading.Thread(target=self.run, args=(job, path, config, float(at)), daemon=True).start()
+            self.enqueue(job, self.run, path, config, float(at))
             return copy.deepcopy(job)
 
     def run(self, job, path, config, at):
@@ -707,7 +886,7 @@ class Studio:
             if action == 'pc_draft': command.append('--draft')
             if action == 'pc_problem': command.append('--add-problem')
             commands.append(command)
-        if job['action'].startswith('voice_'):
+        if job['action'].startswith('voice_') or job.get('generate_voice'):
             command = [sys.executable, '-u', str(ENGINE / 'voice_generation.py'), '--project', str(path), '--data', str(self.data)]
             if job.get('force_voice'): command.append('--force')
             commands.append(command)
@@ -726,11 +905,11 @@ class Studio:
                 with self.lock:
                     if job['cancel']:
                         break
-                    env = {**os.environ, 'PYTHONIOENCODING': 'utf-8', 'PYTHONUNBUFFERED': '1'}
-                    self.process = subprocess.Popen(command, cwd=ENGINE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    env = {**os.environ, 'PYTHONIOENCODING': 'utf-8', 'PYTHONUNBUFFERED': '1', 'VIDEO_TURBO_RENDER_CONCURRENCY': str(max(1, min(4, (os.cpu_count() or 4) // self.max_parallel)))}
+                    process = subprocess.Popen(command, cwd=ENGINE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                                     text=True, encoding='utf-8', errors='replace', env=env,
                                                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-                    process = self.process
+                    self.processes[job['id']] = process
                 for line in process.stdout:
                     line = line.strip()
                     if not line:
@@ -753,7 +932,7 @@ class Studio:
                         if 'Audio' in line or 'muxing' in line: job['stage'] = 'Finishing audio'
                 code = process.wait()
                 with self.lock:
-                    self.process = None
+                    self.processes.pop(job['id'], None)
                     if job['cancel']:
                         break
                 if code != 0:
@@ -769,7 +948,7 @@ class Studio:
                 job['stage'] = job['status'].capitalize()
         finally:
             with self.lock:
-                self.process = None
+                self.processes.pop(job['id'], None)
                 job['finished'] = time.time()
                 if action.startswith('pc_'):
                     tutorial = pc_tips.state(path)
@@ -792,22 +971,33 @@ class Studio:
                     workflow.update(status=status, failed_step=action if job['status'] == 'failed' else '', error=job.get('error', ''))
                     write_json(path / 'ai_workflow.json', workflow)
                     write_json(self.data / 'ai' / 'job.json', job)
-                if self.job is job: write_json(self.data / 'ai' / 'job.json', job)
+                self.persist_jobs()
             if job['action'] == 'ai_prepare' and job['status'] == 'complete': self.maybe_auto_build(job['project'])
 
-    def cancel(self):
+    def cancel(self, job_id=''):
         with self.lock:
-            if not self.job or self.job['status'] != 'running':
-                raise ValueError('No running job to cancel.')
-            self.job['cancel'] = True
-            self.job['status'] = 'cancelling'
-            process = self.process
+            job = next((row for row in self.all_jobs() if row.get('id') == job_id), None) if job_id else self.job
+            if not job or job.get('status') not in ('queued', 'running'):
+                raise ValueError('No running or queued job to cancel.')
+            job['cancel'] = True
+            queued = job['status'] == 'queued'
+            job['status'] = 'cancelled' if queued else 'cancelling'
+            if queued:
+                self.pending = [item for item in self.pending if item[0] is not job]
+                job.update(stage='Cancelled', finished=time.time())
+                path = self.project(job['project'])
+                filename = 'pc_tips.json' if job['action'].startswith('pc_') else 'reference_style.json' if job['action'].startswith('reference_') else 'ai_workflow.json'
+                if (path / filename).is_file():
+                    workflow = read_cache(path / filename); workflow.update(status='cancelled', error='')
+                    write_json(path / filename, workflow)
+            process = self.processes.get(job.get('id'))
             if process and process.poll() is None:
                 if os.name == 'nt':
                     subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], capture_output=True, check=False,
                                    creationflags=subprocess.CREATE_NO_WINDOW)
                 else:
                     process.terminate()
+            self.persist_jobs(); self._dispatch_jobs()
             return {'ok': True}
 
 
@@ -860,12 +1050,12 @@ class Handler(BaseHTTPRequestHandler):
             if host not in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'):
                 self.json_response({'error': 'Use the localhost address.'}, 403); return
             if parsed.path == '/api/health':
-                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series', 'parallel-publishing', 'analytics', 'reference-styles', 'reference-codex', 'reference-models', 'elevenlabs-voice', 'google-flow-handoff', 'flow-portable-prompts', 'pc-tips', 'pc-chatgpt-sign-in', 'pc-auto-ideas', 'pc-visual-modes', 'pc-problem-first', 'pc-google-first']})
+                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series', 'parallel-publishing', 'analytics', 'reference-styles', 'reference-codex', 'reference-models', 'elevenlabs-voice', 'google-flow-handoff', 'flow-portable-prompts', 'pc-tips', 'pc-chatgpt-sign-in', 'pc-auto-ideas', 'pc-visual-modes', 'pc-problem-first', 'pc-google-first', 'antigravity-brief-automation', 'antigravity-new-episodes', 'parallel-production']})
             elif parsed.path == '/api/state':
                 with self.studio.lock:
                     self.json_response({'token': self.studio.token, 'projects': self.studio.list_projects(),
                                         'presets': list(self.studio.presets), 'job': self.studio.job,
-                                        'publishing_job': self.studio.publisher.active_job()})
+                                        'publishing_job': self.studio.publisher.active_job(), **self.studio.production_state()})
             elif parsed.path == '/api/pc-tips/settings':
                 with self.studio.lock:
                     part = pc_tips.next_part(self.studio.data)
@@ -899,6 +1089,10 @@ class Handler(BaseHTTPRequestHandler):
                 with self.studio.lock: self.json_response(self.studio.workflow(query['id'][0]))
             elif parsed.path == '/api/project':
                 with self.studio.lock: self.json_response(self.studio.load(query['id'][0]))
+            elif parsed.path == '/api/brief/automation':
+                self.json_response(antigravity_brief.settings(self.studio.data))
+            elif parsed.path == '/api/jobs':
+                self.json_response(self.studio.production_state())
             elif parsed.path == '/api/job':
                 with self.studio.lock: self.json_response(self.studio.job)
             elif parsed.path == '/api/analytics':
@@ -958,8 +1152,9 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == '/api/upload':
                 with self.studio.lock:
                     role = query.get('role', ['media'])[0]
-                    preparation = self.studio.job and (self.studio.job.get('action') == 'ai_prepare' or self.studio.job.get('action', '').startswith('pc_')) and self.studio.job.get('status') == 'running' and self.studio.job.get('project') == query['id'][0]
-                    if role != 'voice' or not preparation: self.studio.idle()
+                    upload_job = self.studio.project_job(query['id'][0])
+                    preparation = upload_job and (upload_job.get('action') == 'ai_prepare' or upload_job.get('action', '').startswith('pc_')) and upload_job.get('status') == 'running'
+                    if role != 'voice' or not preparation: self.studio.idle(query['id'][0])
                     elif self.studio.publisher.running: raise ValueError('Wait for the publishing upload to finish.')
                     project = self.studio.project(query['id'][0])
                     name = Path(query['name'][0]).name; ext = Path(name).suffix.lower()
@@ -1057,7 +1252,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif parsed.path == '/api/reference/flow/approve':
                     result = self.studio.approve_flow_script(data['id'], data['script'])
                 elif parsed.path == '/api/reference/flow/clip':
-                    self.studio.idle()
+                    self.studio.idle(data['id'])
                     path = self.studio.project(data['id'])
                     flow_workflow.assign_clip(path, data['scene'], data['file'], data.get('offset_seconds', 0), data.get('plan_hash', ''))
                     result = self.studio.load(data['id'])
@@ -1078,6 +1273,8 @@ class Handler(BaseHTTPRequestHandler):
                     result = self.studio.create_ai(data['name'], data.get('provider','gemini'), data['idea'], data.get('language',default_language), series_id)
                 elif parsed.path == '/api/ai/approve': result = self.studio.approve_ai(data['id'], data['script'], data.get('approved',False))
                 elif parsed.path == '/api/ai/retry': result = self.studio.retry_ai(data['id'])
+                elif parsed.path == '/api/brief/automate':
+                    result = self.studio.start_brief_automation(data.get('conversation_id'), data.get('request', ''), data.get('build', True), episode_mode=data.get('episode_mode', 'new'))
                 elif parsed.path == '/api/brief/validate': result = parse_brief(data['brief'])
                 elif parsed.path == '/api/brief/import': result = self.studio.import_brief(data['brief'])
                 elif parsed.path == '/api/brief/prepare': result = self.studio.prepare_imported_assets(data['id'])
@@ -1089,7 +1286,8 @@ class Handler(BaseHTTPRequestHandler):
                 elif parsed.path == '/api/project/delete': result = self.studio.delete_project(data['id'], data.get('confirmed', False))
                 elif parsed.path == '/api/save': result = self.studio.save(data['id'], data['editor'])
                 elif parsed.path == '/api/start': result = self.studio.start(data['id'], data['action'], data.get('at', 0))
-                elif parsed.path == '/api/cancel': result = self.studio.cancel()
+                elif parsed.path == '/api/production/settings': result = self.studio.configure_production(data.get('max_parallel'))
+                elif parsed.path == '/api/cancel': result = self.studio.cancel(data.get('job_id', ''))
                 elif parsed.path == '/api/publishing/save':
                     self.studio.idle(); result = self.studio.publisher.save_draft(data['id'], data['draft'])
                 elif parsed.path == '/api/publishing/settings':
@@ -1107,11 +1305,11 @@ class Handler(BaseHTTPRequestHandler):
                 elif parsed.path == '/api/publishing/disconnect':
                     self.studio.idle(); result = self.studio.publisher.disconnect(data['platform'])
                 elif parsed.path == '/api/publishing/start-many':
-                    self.studio.idle(allow_publishing=True)
+                    self.studio.idle(data['id'], allow_publishing=True)
                     result = self.studio.publisher.start_many(data['id'], data['platforms'], data['draft'],
                               data.get('reviewed', False), data.get('video_signature', ''))
                 elif parsed.path == '/api/publishing/start':
-                    self.studio.idle(allow_publishing=True)
+                    self.studio.idle(data['id'], allow_publishing=True)
                     result = self.studio.publisher.start(data['id'], data['platform'], data['draft'],
                               data.get('reviewed', False), data.get('video_signature', ''))
                 elif parsed.path == '/api/publishing/verify-youtube':
@@ -1154,7 +1352,7 @@ class StudioServer(ThreadingHTTPServer):
         super().server_bind()
 
 
-def running_studio(url, require_series=False, require_parallel=False, require_analytics=False, require_reference=False, require_codex=False, require_models=False, require_voice=False, require_flow=False, require_pc=False):
+def running_studio(url, require_series=False, require_parallel=False, require_analytics=False, require_reference=False, require_codex=False, require_models=False, require_voice=False, require_flow=False, require_pc=False, require_brief=False):
     """Identify this studio without changing its projects or interrupting a job."""
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -1163,6 +1361,7 @@ def running_studio(url, require_series=False, require_parallel=False, require_an
         return (isinstance(data, dict) and data.get('app') == 'video-turbo-studio'
                 and isinstance(data.get('engine'), str) and Path(data['engine']).resolve() == ENGINE
                 and (not require_pc or all(flag in data.get('features', []) for flag in ('pc-tips', 'pc-chatgpt-sign-in', 'pc-auto-ideas', 'pc-visual-modes', 'pc-problem-first', 'pc-google-first')))
+                and (not require_brief or all(flag in data.get('features', []) for flag in ('antigravity-brief-automation', 'antigravity-new-episodes', 'parallel-production')))
                 and (not require_series or 'ai-series' in data.get('features', []))
                 and (not require_parallel or 'parallel-publishing' in data.get('features', []))
                 and (not require_analytics or 'analytics' in data.get('features', []))
@@ -1182,7 +1381,7 @@ def running_studio_idle(url):
         with opener.open(url + '/api/state', timeout=2) as response:
             data = json.loads(response.read(2 * 1024**2))
         return (isinstance(data, dict)
-                and (data.get('job') or {}).get('status') not in ('running', 'cancelling')
+                and all(job.get('status') not in ('queued', 'running', 'cancelling') for job in data.get('jobs', [data.get('job') or {}]))
                 and (data.get('publishing_job') or {}).get('status') not in ('running', 'cancelling'))
     except (OSError, ValueError, TypeError, AttributeError):
         return False
@@ -1200,7 +1399,7 @@ def main():
             server = StudioServer(('127.0.0.1', port), Handler)
             break
         except OSError as error:
-            if running_studio(url, require_series=True, require_parallel=True, require_analytics=True, require_reference=True, require_codex=True, require_models=True, require_voice=True, require_flow=True, require_pc=True):
+            if running_studio(url, require_series=True, require_parallel=True, require_analytics=True, require_reference=True, require_codex=True, require_models=True, require_voice=True, require_flow=True, require_pc=True, require_brief=True):
                 print(f'Video Turbo Studio is already running: {url}', flush=True)
                 if not args.no_browser: webbrowser.open(url)
                 return 0
@@ -1222,7 +1421,7 @@ def main():
     except KeyboardInterrupt: pass
     finally:
         server.studio.analytics.close()
-        if server.studio.job and server.studio.job['status'] == 'running': server.studio.cancel()
+        server.studio.shutdown_jobs()
         server.server_close()
 
 

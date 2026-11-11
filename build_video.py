@@ -57,7 +57,7 @@ PROJECT_PATH = Path(PROJECT_DIR).resolve()
 ENGINE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = PROJECT_PATH / "output"
 CODE_DIR = PROJECT_PATH / "code" if (PROJECT_PATH / "code").exists() else ENGINE_DIR / "code"
-PUBLIC_DIR = CODE_DIR / "public"
+PUBLIC_DIR = OUTPUT_DIR / "remotion-public"
 FONTS_DIR = PROJECT_PATH / "fonts" if (PROJECT_PATH / "fonts").exists() else ENGINE_DIR / "fonts"
 GAMES_DIR = PROJECT_PATH / "games"
 
@@ -78,7 +78,7 @@ def configure_project(project: Path) -> None:
     PROJECT_PATH = Path(project).resolve()
     OUTPUT_DIR = PROJECT_PATH / "output"
     CODE_DIR = PROJECT_PATH / "code" if (PROJECT_PATH / "code").is_dir() else ENGINE_DIR / "code"
-    PUBLIC_DIR = CODE_DIR / "public"
+    PUBLIC_DIR = OUTPUT_DIR / "remotion-public"
     FONTS_DIR = PROJECT_PATH / "fonts" if (PROJECT_PATH / "fonts").is_dir() else ENGINE_DIR / "fonts"
     GAMES_DIR = PROJECT_PATH / "games"
 
@@ -700,7 +700,6 @@ def build_timeline(transcription: dict, vo_duration: float) -> dict:
     if "sections" in config:
         timeline = video_sections.make_timeline(config, PROJECT_PATH, PUBLIC_DIR, words, vo_duration, get_audio_duration)
         validate_timeline(timeline)
-        write_json(CODE_DIR / "src" / "timeline.json", timeline)
         write_json(OUTPUT_DIR / "timeline.json", timeline)
         log("Section timeline built successfully.")
         return timeline
@@ -839,7 +838,6 @@ def build_timeline(transcription: dict, vo_duration: float) -> dict:
     }
 
     validate_timeline(timeline)
-    write_json(CODE_DIR / "src" / "timeline.json", timeline)
     write_json(OUTPUT_DIR / "timeline.json", timeline)
 
     log("Timeline built successfully.")
@@ -1034,15 +1032,26 @@ def run_remotion_command(cmd):
         log("Chrome startup timed out. Retrying once with browser diagnostics...")
 
 
+def renderer_entry() -> Path:
+    """Snapshot the renderer beside its dependencies; each project owns its timeline."""
+    target = CODE_DIR / ".studio-renders" / fingerprint(str(PROJECT_PATH))[:20] / "src"
+    shutil.copytree(CODE_DIR / "src", target, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("timeline.json"))
+    write_json(target / "timeline.json", read_cache(OUTPUT_DIR / "timeline.json"))
+    return target / "index.ts"
+
+
 def render_remotion_video(raw_output: Path):
     log("Rendering video with Remotion CLI...")
     npx_bin = shutil.which("npx") or ("npx.cmd" if os.name == "nt" else "npx")
     cmd = [
         str(npx_bin), "--prefix", str(CODE_DIR), "remotion", "render",
-        str(CODE_DIR / "src" / "index.ts"), "MainVideo",
+        str(renderer_entry()), "MainVideo",
         str(raw_output),
         f"--public-dir={PUBLIC_DIR}"
     ]
+    if os.environ.get("VIDEO_TURBO_RENDER_CONCURRENCY"):
+        cmd.append("--concurrency=" + str(max(1, min(8, int(os.environ["VIDEO_TURBO_RENDER_CONCURRENCY"])))))
     run_remotion_command(cmd)
     log("Remotion render complete.")
 
@@ -1146,7 +1155,6 @@ def main(argv=None) -> int:
         from flow_finishing import prepare_flow_audio
         flow_sfx = prepare_flow_audio(timeline, vo_file, OUTPUT_DIR, PUBLIC_DIR)
         if flow_sfx:
-            write_json(CODE_DIR / "src" / "timeline.json", timeline)
             write_json(OUTPUT_DIR / "timeline.json", timeline)
 
         if args.preview_only:
@@ -1154,7 +1162,7 @@ def main(argv=None) -> int:
                 raise ValueError("Preview time must be within the voiceover duration.")
             npx = shutil.which("npx") or "npx.cmd"
             target = OUTPUT_DIR / "studio_preview_pending.png"
-            run_remotion_command([npx, "--prefix", str(CODE_DIR), "remotion", "still", str(CODE_DIR / "src/index.ts"), "MainVideo", str(target), f"--frame={min(timeline['totalFrames'] - 1, round(args.preview_at * timeline['fps']))}", f"--public-dir={PUBLIC_DIR}"])
+            run_remotion_command([npx, "--prefix", str(CODE_DIR), "remotion", "still", str(renderer_entry()), "MainVideo", str(target), f"--frame={min(timeline['totalFrames'] - 1, round(args.preview_at * timeline['fps']))}", f"--public-dir={PUBLIC_DIR}"])
             target.replace(OUTPUT_DIR / "studio_preview.png")
             log(f"PREVIEW COMPLETE: {OUTPUT_DIR / 'studio_preview.png'}")
             return 0

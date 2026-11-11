@@ -499,11 +499,136 @@ def transparency_storyboard():
     return {'steps':[{'scenes':[opening]},{'scenes':[toggle]},{'scenes':[ending]}]}
 
 
+def control_panel_plan():
+    import copy
+    value=problem_plan()
+    value.update(topic='Show Control Panel applets',topic_key=walkthrough.CONTROL_PANEL_TOPIC)
+    value['steps'].append(copy.deepcopy(value['steps'][-1]))
+    return value
+
+
+def control_panel_storyboard():
+    def scene(action,view,value,before='',options=()):
+        return {'surface':'control_panel','title':'Control Panel' if view=='Category' else 'All Control Panel Items',
+                'path':['Control Panel'] if view=='Category' else ['Control Panel','All Control Panel Items'],
+                'rows':[{'label':'View by:','value':value}],'focus':0,'action':action,
+                'keys':[],'note':'Inspect the actual Control Panel view.','before':before,'options':list(options),
+                'control_panel_view':view}
+    return {'steps':[
+        {'scenes':[scene('result','Category','Category')]},
+        {'scenes':[scene('open_dropdown','Category','Category','Category',walkthrough.CONTROL_PANEL_VIEWS)]},
+        {'scenes':[scene('choose','Category','Large icons','Category',walkthrough.CONTROL_PANEL_VIEWS)]},
+        {'scenes':[scene('result','Large icons','Large icons')]},
+    ]}
+
+
+def taskbar_plan():
+    value=problem_plan()
+    value.update(topic='Keep the taskbar visible',topic_key=walkthrough.TASKBAR_TOPIC)
+    return value
+
+
+def taskbar_storyboard():
+    def scene(surface,state,action,rows,path):
+        return {'surface':surface,'title':path[-1],'path':path,'rows':rows,'focus':0,'action':action,
+                'keys':[],'note':'Show the taskbar behavior.','taskbar_auto_hide':state,'before':'','options':[]}
+    desktop=[{'label':'Recycle Bin','value':''}]
+    opening=scene('desktop','on','move_pointer',desktop,['Desktop'])
+    toggle=scene('settings','on','toggle_off',[{'label':walkthrough.TASKBAR_TOGGLE,'value':'Off'}],
+                 ['Settings','Personalization','Taskbar'])
+    ending=scene('desktop','off','move_pointer',desktop,['Desktop'])
+    return {'steps':[{'scenes':[opening]},{'scenes':[toggle]},{'scenes':[ending]}]}
+
+
 class WalkthroughTests(unittest.TestCase):
     setUp = PcTipsTests.setUp
     seed = PcTipsTests.seed
     asset = PcTipsTests.asset
     intro = PcTipsTests.intro
+
+    def test_taskbar_auto_hide_changes_only_through_the_documented_toggle(self):
+        value=taskbar_storyboard()
+        self.assertEqual(walkthrough.validate(value,taskbar_plan()),value)
+        self.assertIn('move_pointer',walkthrough.CAPABILITIES)
+        self.assertIn('taskbar_auto_hide',walkthrough.PROMPT)
+
+    def test_taskbar_requires_visible_pointer_demonstrations_and_consistent_states(self):
+        import copy
+        for fault in ('missing_state','fake_change','wrong_path','wrong_before','wrong_toggle_value',
+                      'different_desktop','static_opening','static_ending','wrong_surface','shortcut_keys','invalid_state'):
+            value=copy.deepcopy(taskbar_storyboard())
+            opening,toggle,ending=[step['scenes'][0] for step in value['steps']]
+            if fault=='missing_state':toggle.pop('taskbar_auto_hide')
+            elif fault=='fake_change':toggle['action']='result'
+            elif fault=='wrong_path':toggle['path']=['Settings','Personalization','Colors']
+            elif fault=='wrong_before':toggle['taskbar_auto_hide']='off'
+            elif fault=='wrong_toggle_value':toggle['rows'][0]['value']='On'
+            elif fault=='different_desktop':ending['rows']=[{'label':'Other icon','value':''}]
+            elif fault=='static_opening':opening['action']='result'
+            elif fault=='static_ending':ending['action']='result'
+            elif fault=='wrong_surface':opening['surface']='explorer'
+            elif fault=='shortcut_keys':opening['keys']=['Win','D']
+            else:opening['taskbar_auto_hide']=True
+            with self.subTest(fault=fault),self.assertRaises(ValueError):
+                walkthrough.validate(value,taskbar_plan())
+
+    def test_taskbar_final_review_samples_both_opening_and_final_pointer_states(self):
+        saved=self.seed();saved.update(plan=taskbar_plan(),visual_source='illustrated')
+        self.asset('output/final.mp4')
+        write_json(self.project/'output/timeline.json',{'fps':30,'blocks':[
+            {'layout':'pc_demo','startFrame':60,'durationFrames':150},
+            {'layout':'pc_demo','startFrame':210,'durationFrames':150},
+            {'layout':'pc_demo','startFrame':360,'durationFrames':180}]})
+        def extract(command,**kwargs):
+            Image.new('RGB',(540,960),'#19324b').save(command[-1],'JPEG');return Mock(returncode=0)
+        with patch('pc_tips.subprocess.run',side_effect=extract) as ffmpeg,patch('pc_tips_ai.ask',return_value={'passed':True,'issues':[]}) as ask:
+            pc.quality_check(self.project,self.data,saved,{'duration':20})
+        samples=[float(call.args[0][call.args[0].index('-ss')+1]) for call in ffmpeg.call_args_list]
+        self.assertEqual(samples,sorted(samples))
+        self.assertIn(2.1,samples)
+        self.assertIn(5.75,samples)
+        self.assertIn(12.1,samples)
+        self.assertIn(13.3,samples)
+        self.assertIn(17.9,samples)
+        self.assertIn(11,samples)  # The central toggle step must reach the reviewer.
+        self.assertIn('at least three seconds apart',ask.call_args.args[2])
+        self.assertIn('review-only extraction metadata',ask.call_args.args[2])
+        evidence=read_cache(self.project/'output/pc-review-frames.json')['frames']
+        self.assertEqual(len(evidence),len(samples))
+        self.assertEqual([row['video_seconds'] for row in evidence],[round(value,6) for value in samples])
+        for frame in ask.call_args.kwargs['images']:
+            with Image.open(frame) as image:
+                self.assertEqual(image.size,(540,1016))
+                self.assertNotEqual(image.getpixel((15,15)),image.getpixel((15,75)))
+
+    def test_review_samples_each_scene_when_a_step_has_multiple_actions(self):
+        saved=self.seed();saved['visual_source']='illustrated';self.asset('output/final.mp4')
+        write_json(self.project/'output/timeline.json',{'fps':30,'blocks':[
+            {'layout':'pc_demo','startFrame':60,'durationFrames':240,
+             'media':{'src':'sections/media/pc-tips/step.mp4'}}]})
+        write_json(self.project/'media/pc-tips/walkthrough.json',{'steps':[
+            {'file':'step.mp4','scenes':[{}, {}, {}, {}]}]})
+        def extract(command,**kwargs):
+            Image.new('RGB',(540,960),'#19324b').save(command[-1],'JPEG');return Mock(returncode=0)
+        with patch('pc_tips.subprocess.run',side_effect=extract) as ffmpeg,patch('pc_tips_ai.ask',return_value={'passed':True,'issues':[]}):
+            pc.quality_check(self.project,self.data,saved,{'duration':12})
+        samples=[float(call.args[0][call.args[0].index('-ss')+1]) for call in ffmpeg.call_args_list]
+        for expected in (3.6,5.6,7.6,9.6):
+            self.assertTrue(any(abs(value-expected)<1e-6 for value in samples))
+
+    def test_taskbar_generation_reserves_three_seconds_for_result_after_pointer_movement(self):
+        saved=self.seed();saved['plan']=taskbar_plan()
+        process=Mock();process.stdout=iter([]);process.wait.return_value=0
+        scenes=taskbar_storyboard()
+        scenes['steps'][-1]['scenes'].insert(0,dict(scenes['steps'][-1]['scenes'][0],action='result'))
+        with patch('pc_tips_ai.ask',return_value=scenes) as ask,patch('pc_tips_walkthrough.subprocess.Popen',return_value=process),patch('pc_tips.video_info'):
+            walkthrough.generate(self.project,self.data,saved)
+        manifest=read_cache(self.project/'media/pc-tips/walkthrough.json')
+        for index in (0,2):
+            step=manifest['steps'][index]
+            self.assertGreaterEqual(step['frames']/len(step['scenes'])/30-1.2,3)
+        self.assertIn(walkthrough.CAPABILITIES,ask.call_args.args[2])
+        self.assertIn('taskbar_auto_hide',ask.call_args.kwargs['quality_prompt'])
 
     def test_transparency_effect_changes_through_the_documented_toggle(self):
         value=walkthrough.validate(transparency_storyboard(),transparency_plan())
@@ -529,7 +654,7 @@ class WalkthroughTests(unittest.TestCase):
             {'layout':'pc_demo','startFrame':60,'durationFrames':120},
             {'layout':'pc_demo','startFrame':360,'durationFrames':120}]})
         def extract(command,**kwargs):
-            Path(command[-1]).write_bytes(b'image');return Mock(returncode=0)
+            Image.new('RGB',(540,960),'#19324b').save(command[-1],'JPEG');return Mock(returncode=0)
         with patch('pc_tips.subprocess.run',side_effect=extract) as run, \
              patch('pc_tips_ai.ask',return_value={'passed':True,'issues':[]}) as ask:
             pc.quality_check(self.project,self.data,saved,{'duration':20})
@@ -630,6 +755,42 @@ class WalkthroughTests(unittest.TestCase):
         manifest=read_cache(self.project/'media/pc-tips/walkthrough.json')
         self.assertEqual([step['phase'] for step in manifest['steps']],['problem','solution','solution'])
 
+    def test_control_panel_view_opens_without_changing_then_selects_large_icons(self):
+        value=control_panel_storyboard()
+        self.assertEqual(walkthrough.validate(value,control_panel_plan()),value)
+        self.assertIn('open_dropdown',walkthrough.PROMPT)
+        self.assertIn('alphabetical grid',walkthrough.CAPABILITIES)
+
+    def test_control_panel_view_requires_real_menu_semantics_and_state_continuity(self):
+        import copy
+        for fault in ('choose_same','open_changes_value','missing_state','fake_view_change','wrong_before',
+                      'wrong_order','wrong_control','wrong_path','wrong_surface','wrong_keys','wrong_final'):
+            value=copy.deepcopy(control_panel_storyboard())
+            opening,menu,choice,ending=[step['scenes'][0] for step in value['steps']]
+            if fault=='choose_same':menu['action']='choose'
+            elif fault=='open_changes_value':menu['rows'][0]['value']='Large icons'
+            elif fault=='missing_state':menu.pop('control_panel_view')
+            elif fault=='fake_view_change':choice['action']='result'
+            elif fault=='wrong_before':choice['before']='Small icons'
+            elif fault=='wrong_order':choice['options']=['Small icons','Category','Large icons']
+            elif fault=='wrong_control':choice['rows'][0]['label']='Other dropdown'
+            elif fault=='wrong_path':choice['path']=['Control Panel','Mouse']
+            elif fault=='wrong_surface':choice['surface']='explorer'
+            elif fault=='wrong_keys':choice['keys']=['Enter']
+            else:ending['control_panel_view']='Category'
+            with self.subTest(fault=fault),self.assertRaises(ValueError):
+                walkthrough.validate(value,control_panel_plan())
+
+    def test_settings_menu_open_is_distinct_from_selection_and_errors_identify_scene(self):
+        value=storyboard();scene=value['steps'][0]['scenes'][0]
+        scene.update(surface='settings',title='Mouse',path=['Settings','Devices','Mouse'],
+                     action='open_dropdown',before='Right',options=['Left','Right'],keys=[],
+                     rows=[{'label':'Select your primary button','value':'Right'}])
+        self.assertEqual(walkthrough.validate(value,plan()),value)
+        scene['action']='choose'
+        with self.assertRaisesRegex(ValueError,r'steps\[0\]\.scenes\[0\].*open_dropdown'):
+            walkthrough.validate(value,plan())
+
     def test_dropdown_uses_actual_before_and_after_options(self):
         value=storyboard(); scene=value['steps'][0]['scenes'][0]
         scene.update(surface='settings',title='Mouse',path=['Settings','Devices','Mouse'],
@@ -669,7 +830,7 @@ class WalkthroughTests(unittest.TestCase):
     def test_quality_review_uses_illustration_contract(self):
         saved = self.seed(); saved['visual_source']='illustrated'; self.asset('output/final.mp4')
         def extract(command, **kwargs):
-            Path(command[-1]).write_bytes(b'image')
+            Image.new('RGB',(540,960),'#19324b').save(command[-1],'JPEG')
             return Mock(returncode=0)
         with patch('pc_tips.subprocess.run',side_effect=extract), patch('pc_tips_ai.ask',return_value={'passed':True,'issues':[]}) as ask:
             pc.quality_check(self.project,self.data,saved,{'duration':30})
@@ -911,7 +1072,7 @@ class PackageTests(unittest.TestCase):
         saved = self.seed(status='ready')
         self.asset('output/final.mp4')
         def subprocess_result(command, **kwargs):
-            if '-frames:v' in command: Path(command[-1]).write_bytes(b'jpeg')
+            if '-frames:v' in command: Image.new('RGB',(540,960),'#19324b').save(command[-1],'JPEG')
             return Mock(returncode=0)
         with patch('pc_tips.prepare'), patch('pc_tips.subprocess.run', side_effect=subprocess_result), patch('pc_tips.video_info', return_value={'duration': 20, 'width': 1080, 'height': 1920}), patch('pc_tips_ai.ask', return_value={'passed': False, 'issues': ['Unreadable captions']}) as ask, patch('sys.argv', ['pc_tips.py', '--project', str(self.project), '--data', str(self.data)]):
             self.assertEqual(pc.main(), 1)

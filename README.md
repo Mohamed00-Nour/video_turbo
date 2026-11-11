@@ -100,7 +100,9 @@ Asset preparation checks existing `top.mp4` / `bottom.mp4` first. For missing
 clips, it reuses local `raw_gameplay` footage or downloads only the required
 sections around 25% and 60% of the source video. New clips are video-only H.264,
 using the best available video format up to 1080p. Actual network savings depend
-on the source stream and keyframe spacing.
+on the source stream and keyframe spacing. Failed or incomplete section downloads
+retry up to three times with refreshed stream URLs. Completed sections are kept,
+and partial files never become cache hits.
 
 Clips are shared across projects through `output/gameplay_cache` beside
 `prepare_assets.py`. Cache entries depend on the source video, section position,
@@ -726,6 +728,64 @@ Verify without generating paid media:
 python -m unittest -v test_flow_workflow test_reference_styles test_video_studio test_voice_generation
 ```
 
+## Multiple videos in production
+
+Studio can produce several projects at once. **Video production** shows every
+running, queued, completed, or failed job with its own progress and cancel button.
+**Videos at once** defaults to **2** and can be set from **1 to 4**. Additional
+videos wait in order and start automatically as production slots become free.
+
+You can open, edit, or create another project while a video runs. The project
+currently being produced stays protected from edits until its job finishes or is
+cancelled. Cancelling one video does not stop other videos. Queued videos can be
+removed without starting them. After a Studio restart, interrupted jobs remain
+listed and can be retried from their projects.
+
+Each video has separate subprocesses, logs, public assets, and a renderer timeline
+snapshot. Render snapshots live under the renderer's ignored `.studio-renders/`
+folder, and copied public assets live under each project's `output/remotion-public`.
+When generating several episodes from the same Antigravity conversation, script
+generation waits for that series' previous script so episode numbers stay unique;
+footage preparation, narration, and rendering can overlap with other videos.
+
+## Automatic JSON briefs from Antigravity
+
+Choose **New episode from Antigravity** in Studio, or choose **Automatically from
+Antigravity** inside **Import JSON brief**. The conversation ID is prefilled with
+`35260050-98b3-43e5-a228-fa54cd1da0e9` and can be changed.
+
+- **Generate the next new episode** is the default. **Generate & build new
+  episode** writes a fresh script, finds gameplay and available logos, generates
+  narration with the saved default ElevenLabs voice/model, aligns captions,
+  and renders the final MP4. Save your default voice in **Voice settings** first.
+- Leave **Preferences for the new episode** empty to continue the series
+  automatically. Optional preferences can choose a theme or games to cover.
+- **Generate script only** creates a new editable episode without building it.
+- Select **Fetch the latest saved brief** explicitly to import an existing episode.
+
+Studio remembers generated episodes for this conversation, continues the episode
+numbering, and rejects a reused script before narration or rendering. Retrying a
+saved generation step reuses its generated brief rather than creating another
+episode. If Antigravity cannot return direct gameplay links, Studio searches
+YouTube for matching uploaded videos and fills those links before validation.
+The script draft is saved first, so a failed lookup can retry without another
+model call. A draft is regenerated if another project has since taken its episode
+number. Optional logos do not block generation.
+
+Desktop conversations are read from the current Windows user's local
+`.gemini/antigravity/brain/<conversation-id>/.system_generated/logs/transcript.jsonl`.
+Fetching an existing brief needs no model call. Only completed assistant responses
+are eligible; invalid latest briefs stop the workflow rather than silently using
+an older episode. CLI conversations use `agy --conversation <id>` with the
+existing local sign-in. New episodes for desktop conversations use their
+saved user/assistant history and previously generated Studio episodes as context for a new CLI conversation; they do not
+append messages to the desktop conversation. No API key is needed for the
+Antigravity connection.
+
+Progress, cancellation and retry use the existing Studio job controls. Briefs
+and narration settings are saved per project, so failures can be retried without
+creating another project. Manual JSON paste/file import remains available.
+
 ## Reference Styles with local Antigravity or Codex
 
 For built-in animation, select **Video Turbo animation** under **Video creation**.
@@ -984,7 +1044,10 @@ renderer is outdated. Previous media files stay on disk.
    tip: open the same Start menu before and after turning off **Transparency effects**
    in Windows 10 **Personalization > Colors**. Start and the taskbar actually switch
    from translucent/blurred to solid backgrounds; no benchmark or measured resource
-   savings are invented. Both endpoint views and the toggle are validated. Script drafts get one bounded repair per provider after validation or
+   savings are invented. Both endpoint views and the toggle are validated. Taskbar auto-hide
+   tutorials move the cursor from the taskbar into the desktop, show the bar sliding
+   away, then repeat with auto-hide off and hold the visible result for at least
+   three seconds. The real Windows 10 Taskbar toggle and state continuity are validated. Script drafts get one bounded repair per provider after validation or
    quality rejection, followed by another independent review. An automatically
    chosen idea may be replaced within the selected video type when it cannot meet
    these requirements; a user-specified technique is preserved. Walkthrough plans

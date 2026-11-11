@@ -141,11 +141,23 @@ def available_models(data, provider):
     except OSError:
         raise ValueError('The local CLI could not be started. Check its executable path and refresh models.') from None
 
+class AntigravityIncomplete(ValueError):
+    def __init__(self, message, conversation_id='', reason='empty'):
+        super().__init__(message)
+        self.conversation_id = conversation_id
+        self.reason = reason
+
+
 def ask_antigravity(config, project, prompt, schema=None, timeout=600):
     if not config['cli_path']:
         raise ValueError('Antigravity CLI is missing. Install agy and sign in, then check the connection.')
     command = [config['cli_path'], '--input-format', 'stream-json', '--output-format', 'stream-json',
                '--model', config['model'], '--print-timeout', str(timeout) + 's']
+    if config.get('conversation_id'):
+        import uuid
+        try: conversation = str(uuid.UUID(config['conversation_id']))
+        except (ValueError, TypeError, AttributeError): raise ValueError('Enter a valid Antigravity conversation ID.') from None
+        command += ['--conversation', conversation]
     if schema:
         schema_file = Path(project) / 'reference/plan-schema.json'
         write_json(schema_file, schema)
@@ -173,7 +185,8 @@ def ask_antigravity(config, project, prompt, schema=None, timeout=600):
             step = item.get('step_update', {})
             tool = step.get('tool_info', {})
             if tool.get('name'):
-                tools.append({'name': tool['name'], 'state': step.get('state'), 'failed': bool(tool.get('error'))})
+                tools.append({'name': tool['name'], 'state': step.get('state'), 'failed': bool(tool.get('error')),
+                              'permission_denied': bool(tool.get('error')) and any(word in str(tool['error']).lower() for word in ('permission denied', 'permission required', 'not authorized'))})
             if step.get('state') == 'DONE' and tool.get('name') in ('view_file', 'view_image', 'read_image') and not tool.get('error'):
                 path = tool.get('parameters', {}).get('AbsolutePath')
                 if isinstance(path, str):
@@ -182,6 +195,8 @@ def ask_antigravity(config, project, prompt, schema=None, timeout=600):
             continue
     if result.returncode or not envelope or envelope.get('status') != 'SUCCESS':
         detail = (envelope or {}).get('error', '')
+        if config.get('conversation_id') and any(text in (detail + result.stderr).lower() for text in ('trajectory not found', 'conversation not found')):
+            raise ValueError('This conversation was not found in the connected Antigravity CLI. Open or resume it with this local CLI, or use a conversation ID available to that CLI.')
         if 'auth' in (detail + result.stderr).lower():
             raise ValueError('Antigravity needs sign-in. Open agy interactively once, sign in, and retry.')
         if 'model' in detail.lower():
@@ -191,19 +206,26 @@ def ask_antigravity(config, project, prompt, schema=None, timeout=600):
         write_json(Path(project) / 'reference/antigravity-response.json', {'result': envelope, 'tools': tools})
     required = {str(Path(path).resolve()).casefold() for path in config.get('required_images', [])}
     if not required <= viewed_images:
-        raise ValueError('Google could not verify that every requested review image was opened. Trying the connected fallback.')
+        raise ValueError('Google could not verify that every requested review image was opened.')
     if schema:
         value = envelope.get('structured_output')
         if value is None:
             raw = (envelope.get('response') or '').strip()
             if not raw:
-                raise ValueError('Antigravity returned no structured output. Its noninteractive turn may have stopped '
-                                 'at a tool permission request. See reference/antigravity-response.json; trying the connected fallback.')
+                duration = envelope.get('duration_seconds', 0)
+                timed_out = isinstance(duration, (int, float)) and duration >= max(0, timeout - 2)
+                denied = any(tool.get('permission_denied') for tool in tools)
+                reason = 'timeout' if timed_out else 'permission' if denied else 'empty'
+                detail = ('Its research reached the time limit before returning a brief.' if timed_out else
+                          'A tool permission request was denied; check the Antigravity connection.' if denied else
+                          'The turn ended without a final JSON response.')
+                raise AntigravityIncomplete('Antigravity returned no structured output. ' + detail +
+                    ' Research diagnostics are saved in reference/antigravity-response.json.', envelope.get('conversation_id', ''), reason)
             if raw.startswith('```'): raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw)
             try: value = json.loads(raw)
             except ValueError:
                 raise ValueError('Antigravity returned non-JSON output. See reference/antigravity-response.json; '
-                                 'trying the connected fallback.') from None
+                                 'retry the step.') from None
         return value, {k: envelope[k] for k in ('conversation_id', 'usage', 'duration_seconds') if k in envelope}
     return envelope.get('response', '').strip()
 

@@ -13,7 +13,7 @@ from pipeline_common import fingerprint, read_cache, write_json
 ENGINE = Path(__file__).resolve().parent
 SURFACES = ('settings', 'explorer', 'clipboard', 'notepad', 'desktop', 'start', 'task_manager', 'control_panel', 'windows')
 WINDOW_ACTIONS = ('activate_window', 'snap_left', 'snap_right', 'calculate')
-ACTIONS = ('select', 'toggle_on', 'toggle_off', 'shortcut', 'result', 'context_menu', 'choose', *WINDOW_ACTIONS)
+ACTIONS = ('select', 'toggle_on', 'toggle_off', 'shortcut', 'result', 'context_menu', 'open_dropdown', 'choose', 'move_pointer', *WINDOW_ACTIONS)
 CAPABILITIES = (
     'Animated mode can show Settings, Explorer, Clipboard, Notepad, Desktop, Start, Task Manager and Control Panel '
     'using rows, selection, toggles, dropdowns, shortcuts and context menus. It can also show two actual windows '
@@ -26,10 +26,23 @@ CAPABILITIES = (
     'It can show actual acrylic transparency on the Start menu and taskbar, switch Transparency effects off '
     'in Windows 10 Settings > Personalization > Colors, and reopen the same Start menu with solid backgrounds. '
     'This demonstrates removal of a documented GPU-intensive visual effect, not a measured speed/resource improvement. '
+    'It can move the pointer from the bottom taskbar into the desktop using move_pointer and taskbar_auto_hide '
+    'on/off: the taskbar slides down with auto-hide on and remains fully visible with it off. '
+    'The pointer moves during the first second, and the result is held for at least three seconds. '
+    'The auto-hide state changes only through Automatically hide the taskbar in desktop mode in '
+    'Settings > Personalization > Taskbar. '
+    'It can open a dropdown without changing its value using open_dropdown, then select an option using choose. '
+    'Control Panel View by supports Category, Large icons and Small icons; the renderer shows all eight '
+    'category groups or an alphabetical grid of common Windows applets, not just a text label for the view. '
+    'The control_panel_view field describes the view before each action and is preserved across scenes. '
     'Choose a tip whose problem, every action and final result can be demonstrated with these capabilities. '
     'Do not substitute rows or explanatory notes for unsupported visual effects or applications. '
 )
 PERFORMANCE_TOPIC = 'windows10-disable-transparency-effects'
+TASKBAR_TOPIC = 'windows10-taskbar-disable-auto-hide'
+TASKBAR_TOGGLE = 'Automatically hide the taskbar in desktop mode'
+CONTROL_PANEL_TOPIC = 'windows10-control-panel-large-icons-view'
+CONTROL_PANEL_VIEWS = ('Category', 'Large icons', 'Small icons')
 PERFORMANCE_GUIDANCE = (
     'For an animated performance episode, use the supported technique windows10-disable-transparency-effects. '
     'Show a Windows 10 dark-mode Start menu with acrylic transparency initially On. '
@@ -64,6 +77,8 @@ SCENE_SCHEMA = object_schema({
     'windows': {'type': 'array', 'items': WINDOW_SCHEMA, 'maxItems': 2},
     'active_window': {'type': 'integer'}, 'snap_assist': {'type': 'boolean'},
     'transparency': {'type': 'string', 'enum': ['', 'on', 'off']},
+    'taskbar_auto_hide': {'type': 'string', 'enum': ['', 'on', 'off']},
+    'control_panel_view': {'type': 'string', 'enum': ['', *CONTROL_PANEL_VIEWS]},
 })
 SCHEMA = object_schema({'steps': {'type': 'array', 'items': object_schema({
     'scenes': {'type': 'array', 'items': SCENE_SCHEMA}
@@ -76,15 +91,19 @@ PROMPT = (
     'Use context_menu to animate a click opening a context menu, e.g. a swapped left mouse button. Use result/shortcut for other observable pain. '
     'Do not show an enabling/disabling setting as the problem demonstration. The note describes the symptom, not the fix. '
     'Target Windows 10 only, including its exact Settings routes, left taskbar and classic context menus. Never use Windows 11 UI or Accessibility routes.  '
-    'Choose the surface that actually matches the scene: settings, explorer, clipboard, notepad, desktop, start, task_manager, control_panel or windows. Do not represent unsupported applications as Settings. Use exact Windows 10 labels, not invented controls, benchmarks or results. For a Settings category selection use title Windows Settings and path Settings. For a settings page end path with its actual page title. For shortcut actions the surface is the panel opened AFTER pressing the keys. Clipboard opens a separate Clipboard panel with no emoji tabs. A context_menu scene uses surface desktop for Start or a desktop icon, explorer for a file. Its rows contain the clicked target and 2-3 genuine adjacent menu entries in their actual order; focus identifies only the clicked target. For toggle scenes include only the targeted toggle plus adjacent real settings with On/Off values; do not invent a success message. For Notepad, row labels are actual sample document text shown on separate lines. Each scene starts from the supplied visible state and clicks once halfway through; use another scene for the next navigation screen.  '
+    'Choose the surface that actually matches the scene: settings, explorer, clipboard, notepad, desktop, start, task_manager, control_panel or windows. Do not represent unsupported applications as Settings. Use exact Windows 10 labels, not invented controls, benchmarks or results. For a Settings category selection use title Windows Settings and path Settings. For a settings page end path with its actual page title. For shortcut actions the surface is the panel opened AFTER pressing the keys. Clipboard opens a separate Clipboard panel with no emoji tabs. A context_menu scene uses surface desktop for Start or a desktop icon, explorer for a file. Its rows contain the clicked target and 2-3 genuine adjacent menu entries in their actual order; focus identifies only the clicked target. For toggle scenes include only the targeted toggle plus adjacent real settings with On/Off values; do not invent a success message. For Notepad, row labels are actual sample document text shown on separate lines. Each scene starts from the supplied visible state; click actions click once halfway through; use another scene for the next navigation screen.  '
     'Each scene has title (English app/page name, <=60 chars), path (1-6 short English breadcrumb labels), '
     'rows (empty on windows, otherwise 1-4 relevant visible items, each label <=65 chars and value <=35 chars, empty value allowed), '
-    'focus (zero-based targeted row or window index), action (select, toggle_on, toggle_off, shortcut, result, context_menu, choose, activate_window, snap_left, snap_right or calculate), '
+    'focus (zero-based targeted row or window index), action (select, toggle_on, toggle_off, shortcut, result, context_menu, open_dropdown, choose, move_pointer, activate_window, snap_left, snap_right or calculate), '
     'keys (2-4 short keys for shortcut, Win and Left/Right for snap actions, one click label such as Left click for context_menu, otherwise empty), and note (one brief Egyptian Arabic instruction <=100 chars). '
     'For context_menu, rows must contain the clicked target at focus, followed by 2-3 actual menu entries for that target. A Start shortcut menu is different from a file menu. '
-    'For choose, focus an actual dropdown, put the final selected option in the focused row value and its current option in before. '
+    'For open_dropdown and choose, focus an actual dropdown on settings or the Control Panel View by control. '
+    'open_dropdown opens and holds the menu without selecting: before and the focused row value are the SAME current option. '
+    'choose selects a DIFFERENT option: put the final selected option in the focused row value and its current option in before. '
+    'Use empty keys for both dropdown actions. '
     'For example, Windows 10 Devices > Mouse uses Select your primary button with before Right and final value Left. '
-    'For choose, options contains all actual dropdown choices in their native order. For calculate, before is the addition expression. For all remaining actions before is empty. Outside choose, options is empty. '
+    'For both dropdown actions, options contains all actual choices in their native order, including before and the focused row value. '
+    'For calculate, before is the addition expression. For all remaining actions before is empty. Outside dropdown actions, options is empty. '
     'For select, focus the menu item being opened. For toggle actions, focus the actual setting label. '
     'Preserve all conditional instructions in the note; e.g. disable Filter Keys only if enabled. '
     'For shortcut, use rows to illustrate the panel/result and keys for the shortcut. '
@@ -107,6 +126,25 @@ PROMPT = (
     'The opening and final scenes reopen Start using action shortcut, keys [Ctrl, Esc], identical app rows and '
     'transparency on then off respectively. Keep all intermediate scene states consistent. '
     'Outside a transparency tutorial use transparency empty. '
+    'For a taskbar auto-hide tutorial, set taskbar_auto_hide to on or off in EVERY scene, describing the state '
+    'BEFORE the action. Use one desktop move_pointer scene for the problem and repeat it for the final result, '
+    'with identical rows and taskbar_auto_hide on then off. move_pointer visibly moves the cursor from the '
+    'taskbar into the desktop during the first second; the taskbar slides down only when auto-hide is on. '
+    'The renderer gives each such scene at least five seconds, holding the result for at least three seconds. '
+    'Use keys empty; do not describe cursor movement in a static result scene. '
+    'Change the state with toggle_off in Settings > Personalization > Taskbar, focused on '
+    'Automatically hide the taskbar in desktop mode, row value Off, taskbar_auto_hide on. '
+    'Subsequent scenes use off. Outside this tutorial use taskbar_auto_hide empty. '
+    'For a Control Panel View by tutorial, use surface control_panel and set control_panel_view in EVERY scene. '
+    'Use exactly one row, label View by: and value equal to the current view, or the NEW view for choose; focus is 0. '
+    'The renderer supplies the actual eight-category layout or alphabetical applet grid automatically; rows describe '
+    'the dropdown, not the grid contents. Use path [Control Panel] and title Control Panel initially. '
+    'The opening is result with control_panel_view Category. To open View by, use open_dropdown with before Category, '
+    'row value Category and options [Category, Large icons, Small icons]. To select Large icons in the next shot, '
+    'use choose with before Category, row value Large icons, the same options and control_panel_view Category. '
+    'The renderer visibly changes the grid after selection. The final scene uses result, control_panel_view Large icons, '
+    'row value Large icons, title All Control Panel Items and path [Control Panel, All Control Panel Items]. '
+    'Outside this root Control Panel view tutorial use control_panel_view empty. '
     'Research only if the plan is ambiguous; do not change the tip or narration.\n'
 )
 
@@ -172,11 +210,13 @@ def validate(value, plan):
     output = []
     previous_windows = None
     previous_transparency = None
-    for step in value['steps']:
+    previous_taskbar_auto_hide = None
+    previous_control_panel_view = None
+    for step_index, step in enumerate(value['steps']):
         if not isinstance(step, dict) or not isinstance(step.get('scenes'), list) or not 1 <= len(step['scenes']) <= 4:
             raise ValueError('Each animated step needs 1 to 4 scenes.')
         scenes = []
-        for scene in step['scenes']:
+        for scene_index, scene in enumerate(step['scenes']):
             if not isinstance(scene, dict): raise ValueError('Invalid animated scene.')
             if scene.get('surface') not in SURFACES: raise ValueError('Choose a supported Windows 10 interface surface.')
             if any(label in json.dumps(scene, ensure_ascii=False).lower() for label in ('windows 11', 'accessibility', 'snap layouts')):
@@ -214,6 +254,23 @@ def validate(value, plan):
                 previous_transparency = final
             elif transparency:
                 previous_transparency = transparency
+            auto_hide = scene.get('taskbar_auto_hide', '')
+            if auto_hide not in ('', 'on', 'off'):
+                raise ValueError('Taskbar auto-hide must be on, off or empty for an unrelated tutorial.')
+            if previous_taskbar_auto_hide is not None and auto_hide != previous_taskbar_auto_hide:
+                raise ValueError('Preserve taskbar auto-hide between scenes; change it with the actual Settings toggle.')
+            changes_auto_hide = not window_scene and action in ('toggle_on', 'toggle_off') and normalized_rows[focus]['label'] == TASKBAR_TOGGLE
+            if changes_auto_hide:
+                final = 'on' if action == 'toggle_on' else 'off'
+                if (scene['surface'] != 'settings' or path != ['Settings', 'Personalization', 'Taskbar']
+                        or auto_hide != ('off' if final == 'on' else 'on')
+                        or normalized_rows[focus]['value'].lower() != final):
+                    raise ValueError('Change taskbar auto-hide using its Windows 10 Taskbar toggle and correct before/after states.')
+                previous_taskbar_auto_hide = final
+            elif auto_hide:
+                previous_taskbar_auto_hide = auto_hide
+            if action == 'move_pointer' and (scene['surface'] != 'desktop' or not auto_hide or keys):
+                raise ValueError('Move the pointer from taskbar to desktop with an explicit auto-hide state and no shortcut keys.')
             if action == 'context_menu' and len(rows) < 3:
                 raise ValueError('Show the clicked target and its actual context-menu entries.')
             options = scene.get('options', [])
@@ -221,8 +278,36 @@ def validate(value, plan):
             options = [text(option, 'Dropdown option', 35) for option in options]
             before = scene.get('before', '')
             if not isinstance(before, str) or len(before) > 35: raise ValueError('Invalid previous dropdown value.')
-            if action == 'choose' and (scene['surface'] != 'settings' or len(options) < 2 or len(set(options)) != len(options) or before.strip() not in options or normalized_rows[focus]['value'] not in options or before.strip() == normalized_rows[focus]['value']):
-                raise ValueError('A Settings dropdown needs its current and chosen option.')
+            location = f'steps[{step_index}].scenes[{scene_index}]'
+            if action in ('open_dropdown', 'choose'):
+                if scene['surface'] not in ('settings', 'control_panel'):
+                    raise ValueError(f'{location}: dropdown actions require Settings or Control Panel View by.')
+                if len(options) < 2 or len(set(options)) != len(options) or before.strip() not in options or normalized_rows[focus]['value'] not in options:
+                    raise ValueError(f'{location}: dropdown options must contain both before (current option) and the focused row value.')
+                if keys:
+                    raise ValueError(f'{location}: dropdown actions use empty keys.')
+                same = before.strip() == normalized_rows[focus]['value']
+                if action == 'choose' and same:
+                    raise ValueError(f'{location}: choose must change the value. To open and hold the menu without changing it, use open_dropdown with before and row value equal.')
+                if action == 'open_dropdown' and not same:
+                    raise ValueError(f'{location}: open_dropdown preserves the current option; use choose to select a different option.')
+            panel_view = scene.get('control_panel_view', '')
+            if panel_view not in ('', *CONTROL_PANEL_VIEWS):
+                raise ValueError(f'{location}: choose a supported Control Panel view.')
+            if previous_control_panel_view is not None and panel_view != previous_control_panel_view:
+                raise ValueError(f'{location}: preserve Control Panel view between scenes; change it with choose on View by.')
+            if panel_view or scene['surface'] == 'control_panel' and action in ('open_dropdown', 'choose'):
+                if (scene['surface'] != 'control_panel' or not panel_view
+                        or path not in (['Control Panel'], ['Control Panel', 'All Control Panel Items'])
+                        or len(normalized_rows) != 1 or normalized_rows[focus]['label'] != 'View by:'):
+                    raise ValueError(f'{location}: Control Panel view scenes require a root Control Panel path, control_panel_view and one View by: row.')
+                final_view = normalized_rows[focus]['value']
+                if action in ('open_dropdown', 'choose'):
+                    if options != list(CONTROL_PANEL_VIEWS) or before.strip() != panel_view:
+                        raise ValueError(f'{location}: View by uses options Category, Large icons, Small icons in that order, with before matching control_panel_view.')
+                elif action != 'result' or final_view != panel_view or before.strip() or options or keys:
+                    raise ValueError(f'{location}: hold the current Control Panel view with result, matching row value and empty before/options/keys.')
+                previous_control_panel_view = final_view if action == 'choose' else panel_view
             if window_scene:
                 validate_window_action(scene, windows, before.strip(), keys)
                 if previous_windows:
@@ -246,9 +331,24 @@ def validate(value, plan):
                 'note': text(scene.get('note'), 'Animated instruction', 100)})
             if transparency:
                 scenes[-1]['transparency'] = transparency
+            if auto_hide:
+                scenes[-1]['taskbar_auto_hide'] = auto_hide
+            if panel_view:
+                scenes[-1]['control_panel_view'] = panel_view
             if window_scene:
                 scenes[-1].update(windows=windows, active_window=scene['active_window'], snap_assist=scene.get('snap_assist', False))
         output.append({'scenes': scenes})
+    if plan.get('topic_key') == CONTROL_PANEL_TOPIC:
+        opening, ending = output[0]['scenes'][0], output[-1]['scenes'][-1]
+        if (opening['action'] != 'result' or ending['action'] != 'result'
+                or opening.get('control_panel_view') != 'Category' or ending.get('control_panel_view') != 'Large icons'):
+            raise ValueError('Show the actual Category layout before and the Large icons applet grid after changing View by.')
+    if plan.get('topic_key') == TASKBAR_TOPIC:
+        opening, ending = output[0]['scenes'][0], output[-1]['scenes'][-1]
+        if (opening['action'] != 'move_pointer' or ending['action'] != 'move_pointer'
+                or opening.get('taskbar_auto_hide') != 'on' or ending.get('taskbar_auto_hide') != 'off'
+                or opening['rows'] != ending['rows']):
+            raise ValueError('Repeat the same taskbar-to-desktop pointer movement before and after disabling auto-hide.')
     if plan.get('topic_key') == PERFORMANCE_TOPIC:
         opening, ending = output[0]['scenes'][0], output[-1]['scenes'][-1]
         if (opening['surface'] != 'start' or ending['surface'] != 'start'
@@ -270,10 +370,10 @@ def generate(project, data, saved):
         description='One entry per required shot, including the problem first.')
     required_shots = [{'index': i, 'role': 'problem' if i == 0 and saved['plan'].get('problem') else 'solution', **shot}
                       for i, shot in enumerate(shots)]
-    request = PROMPT + f'\nReturn exactly {len(shots)} entries in steps, in required_shots order. ' + json.dumps(
+    request = PROMPT + CAPABILITIES + f'\nReturn exactly {len(shots)} entries in steps, in required_shots order. ' + json.dumps(
         {'plan': saved['plan'], 'required_shots': required_shots}, ensure_ascii=False)
-    storyboard_signature = fingerprint({'plan':saved['plan'], 'prompt':PROMPT, 'schema':schema})
-    signature = fingerprint({'plan': saved['plan'], 'template': WALKTHROUGH_STYLE,
+    storyboard_signature = fingerprint({'plan':saved['plan'], 'prompt':PROMPT, 'capabilities':CAPABILITIES, 'schema':schema})
+    signature = fingerprint({'storyboard_signature': storyboard_signature, 'plan': saved['plan'], 'template': WALKTHROUGH_STYLE,
         'source': (ENGINE / 'code/src/PcWalkthrough.tsx').read_text('utf-8')})
     manifest_path = folder / 'walkthrough.json'
     previous = read_cache(manifest_path)
@@ -292,6 +392,8 @@ def generate(project, data, saved):
         phase = 'problem' if index == 1 and saved['plan'].get('problem') else 'solution'
         step.update(os=planned['os'], phase=phase, frames=max(90 if phase == 'problem' else 240, min(150 if phase == 'problem' else 720, round(len(planned['narration'].split()) / 2.7 * 30))),
                     file=f'animated-step-{signature[:12]}-{index}.mp4')
+        if any(scene['action'] == 'move_pointer' for scene in step['scenes']):
+            step['frames'] = max(step['frames'], 150 * len(step['scenes']))
     manifest = {**storyboard, 'signature': signature, 'storyboard_signature': storyboard_signature}
     write_json(manifest_path, manifest)
     print('[PC TIPS] Rendering clearly labeled animated tutorial scenes.', flush=True)

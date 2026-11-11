@@ -252,6 +252,48 @@ class HttpTests(unittest.TestCase):
         finally:
             server.server_close()
 
+    def test_production_settings_require_token_and_return_all_jobs(self):
+        with urllib.request.urlopen(self.url + '/api/jobs') as response:
+            self.assertEqual(json.load(response), {'max_parallel': 2, 'jobs': []})
+        payload = json.dumps({'max_parallel': 3}).encode()
+        with self.assertRaises(urllib.error.HTTPError) as rejected:
+            self.request('/api/production/settings', payload, token=False)
+        self.assertEqual(rejected.exception.code, 403)
+        with self.request('/api/production/settings', payload) as response:
+            self.assertEqual(json.load(response)['max_parallel'], 3)
+        with urllib.request.urlopen(self.url + '/api/state') as response:
+            self.assertEqual(json.load(response)['max_parallel'], 3)
+
+    def test_cancel_endpoint_targets_one_queued_video(self):
+        self.app.configure_production(1)
+        other = self.app.create('Queued video')
+        with patch.object(studio.threading, 'Thread'):
+            active = self.app._ai_job(self.identifier, 'build', 'Rendering')
+            self.app.enqueue(active, self.app.run, self.app.project(self.identifier), {}, 0)
+            queued = self.app._ai_job(other, 'build', 'Rendering')
+            self.app.enqueue(queued, self.app.run, self.app.project(other), {}, 0)
+        with self.request('/api/cancel', json.dumps({'job_id': queued['id']}).encode()) as response:
+            self.assertTrue(json.load(response)['ok'])
+        self.assertEqual(queued['status'], 'cancelled')
+        self.assertEqual(active['status'], 'running')
+
+    def test_automated_brief_api_requires_token_and_forwards_options(self):
+        payload = {'conversation_id': '35260050-98b3-43e5-a228-fa54cd1da0e9',
+                   'request': 'Create the next episode', 'build': False}
+        result = {'project': {'id': 'new'}, 'job': {'status': 'running'}}
+        with patch.object(self.app, 'start_brief_automation', return_value=result) as automate:
+            with self.assertRaises(urllib.error.HTTPError) as rejected:
+                self.request('/api/brief/automate', json.dumps(payload).encode(), token=False)
+            self.assertEqual(rejected.exception.code, 403); automate.assert_not_called()
+            with self.request('/api/brief/automate', json.dumps(payload).encode()) as response:
+                self.assertEqual(json.load(response), result)
+        automate.assert_called_once_with(payload['conversation_id'], payload['request'], False, episode_mode='new')
+
+    def test_automated_brief_settings_prefill_conversation_without_creating_project(self):
+        with urllib.request.urlopen(self.url + '/api/brief/automation') as response:
+            self.assertEqual(json.load(response)['conversation_id'], '35260050-98b3-43e5-a228-fa54cd1da0e9')
+        self.assertEqual(len(self.app.registry), 1)
+
     def test_descriptive_json_fields_round_trip_through_http_import(self):
         brief = {'project_name': 'ألعاب PC مجانية - الحلقة 12', 'script': 'أول لعبة Helltaker.',
                  'games': [{'exact_name': 'Helltaker', 'spoken_names': ['Helltaker', 'هيل تيكر'],

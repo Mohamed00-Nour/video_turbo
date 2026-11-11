@@ -7,9 +7,9 @@ type Surface = 'settings'|'explorer'|'clipboard'|'notepad'|'desktop'|'start'|'ta
 type WindowState = {app:'notepad'|'calculator';placement:'floating'|'left'|'right';text:string};
 type Scene = {
  surface: Surface; title: string; path: string[]; rows: {label: string; value: string}[];
- focus: number; action: 'select'|'toggle_on'|'toggle_off'|'shortcut'|'result'|'context_menu'|'choose'|'activate_window'|'snap_left'|'snap_right'|'calculate';
+ focus: number; action: 'select'|'toggle_on'|'toggle_off'|'shortcut'|'result'|'context_menu'|'open_dropdown'|'choose'|'move_pointer'|'activate_window'|'snap_left'|'snap_right'|'calculate';
  keys: string[]; note: string; before?: string; options?: string[];
- windows?:WindowState[];active_window?:number;snap_assist?:boolean;transparency?:''|'on'|'off';
+ windows?:WindowState[];active_window?:number;snap_assist?:boolean;transparency?:''|'on'|'off';taskbar_auto_hide?:''|'on'|'off';control_panel_view?:''|'Category'|'Large icons'|'Small icons';
 };
 type Props = {os: string; phase?: 'problem'|'solution'; frames: number; scenes: Scene[]};
 const blue='#0078d7';
@@ -123,11 +123,11 @@ const Settings:React.FC<{scene:Scene;acted:boolean;progress:number}>=({scene,act
   <div style={{position:'absolute',left:274,top:62,right:26,bottom:0,overflow:'hidden'}}>
    <h1 style={{fontWeight:400,fontSize:32,lineHeight:1.2,margin:'0 0 30px'}}>{page}</h1>
    {scene.rows.map((row,i)=>{
-    const active=i===scene.focus,choose=active&&scene.action==='choose',dropdown=choose||['Left','Right'].includes(row.value),on=active&&toggle?(scene.action==='toggle_on'?acted:!acted):row.value.toLowerCase()==='on';
+    const active=i===scene.focus,choose=active&&scene.action==='choose',openDropdown=active&&scene.action==='open_dropdown',dropdown=choose||openDropdown||['Left','Right'].includes(row.value),on=active&&toggle?(scene.action==='toggle_on'?acted:!acted):row.value.toLowerCase()==='on';
     return <div key={i} data-win10-row={i} style={{height:106,boxSizing:'border-box',padding:'8px 0',background:active&&progress>.4&&progress<.58?'#f3f3f3':'transparent'}}>
      <div style={{fontSize:21,lineHeight:1.25,fontWeight:toggle?600:400,maxWidth:560}}>{row.label}</div>
      {dropdown?<div style={{position:'relative',marginTop:10,width:220,fontSize:18}}><div style={{height:32,border:'2px solid #888',padding:'3px 10px',boxSizing:'border-box'}}>{choose&&!acted?scene.before:row.value}<span style={{float:'right'}}>⌄</span></div>
-      {choose&&progress>.28&&!acted&&<div style={{position:'absolute',top:-(scene.options||[]).indexOf(scene.before||'')*34,left:0,right:0,zIndex:3,border:'1px solid #777',background:'#f2f2f2',boxShadow:'0 4px 9px #0003'}}>{(scene.options||[]).map((option,n)=><div key={n} style={{height:34,boxSizing:'border-box',padding:'5px 10px',background:option===row.value&&progress>.4?'#cce8ff':'transparent'}}>{option}</div>)}</div>}
+      {(openDropdown&&acted||choose&&progress>.28&&!acted)&&<div style={{position:'absolute',top:-(scene.options||[]).indexOf(scene.before||'')*34,left:0,right:0,zIndex:3,border:'1px solid #777',background:'#f2f2f2',boxShadow:'0 4px 9px #0003'}}>{(scene.options||[]).map((option,n)=><div key={n} style={{height:34,boxSizing:'border-box',padding:'5px 10px',background:option===row.value&&progress>.4?'#cce8ff':'transparent'}}>{option}</div>)}</div>}
      </div>:active&&toggle||/^(on|off)$/i.test(row.value)?<Toggle on={on} amount={active&&toggle?amount:on?1:0}/>:<div style={{marginTop:10,fontSize:18,color:scene.action==='select'?blue:'#555'}}>{row.value}</div>}
     </div>;
    })}
@@ -161,10 +161,51 @@ const TaskManager:React.FC<{scene:Scene;acted:boolean}>=({scene,acted})=><Window
  <div style={{display:'flex',fontSize:16,borderBottom:'1px solid #aaa',gap:0}}>{['Processes','Performance','App history','Startup','Users','Details','Services'].map(x=><span key={x} style={{padding:'7px 10px',border:'1px solid #bbb',borderBottom:0,background:scene.path.includes(x)?'white':'#eee'}}>{x}</span>)}</div>
  <div style={{margin:20,fontSize:18}}><div style={{padding:'12px',borderBottom:'1px solid #aaa',background:'#f4f4f4'}}>Name <span style={{float:'right'}}>Status</span></div>{scene.rows.map((row,i)=><div key={i} style={{height:56,padding:'10px 12px',boxSizing:'border-box',background:i===scene.focus?'#d9edff':'white',borderBottom:'1px solid #eee'}}>{row.label}<span style={{float:'right'}}>{acted?row.value:scene.action==='toggle_off'&&i===scene.focus?'Enabled':row.value}</span></div>)}</div>
 </Window>;
-const ControlPanel:React.FC<{scene:Scene;progress:number}>=({scene,progress})=><Window title="Control Panel">
- <div style={{padding:'10px 22px',borderBlock:'1px solid #ddd',fontSize:17}}>←　↑　{scene.path.join('　›　')}</div>
- <div style={{display:'flex'}}><aside style={{width:205,padding:24,color:'#0066bb',fontSize:17}}>Control Panel Home</aside><main style={{flex:1,padding:'25px 20px'}}><h1 style={{margin:'0 0 30px',fontSize:27,fontWeight:400,color:'#006600'}}>{scene.title}</h1>{scene.rows.map((row,i)=><div key={i} style={{padding:'14px 8px',fontSize:21,color:'#0066bb',background:i===scene.focus&&progress>.4?'#e5f3ff':'white'}}>{row.label}<div style={{fontSize:17,color:'#555',marginTop:5}}>{row.value}</div></div>)}</main></div>
-</Window>;
+const controlPanelCategories=[
+ ['System and Security','Review your computer status'],['Network and Internet','View network status and tasks'],
+ ['Hardware and Sound','View devices and printers'],['Programs','Uninstall a program'],
+ ['User Accounts','Change account type'],['Appearance and Personalization','Adjust your computer settings'],
+ ['Clock and Region','Change date, time, or number formats'],['Ease of Access','Let Windows suggest settings'],
+];
+const controlPanelApplets=[
+ 'Administrative Tools','AutoPlay','Backup and Restore (Windows 7)','Color Management','Credential Manager',
+ 'Date and Time','Default Programs','Device Manager','Devices and Printers','Ease of Access Center',
+ 'File Explorer Options','File History','Fonts','Indexing Options','Internet Options','Keyboard','Mouse',
+ 'Network and Sharing Center','Phone and Modem','Power Options','Programs and Features','Recovery','Region',
+ 'RemoteApp and Desktop Connections','Security and Maintenance','Sound','Speech Recognition','Storage Spaces',
+ 'Sync Center','System','Taskbar and Navigation','Troubleshooting','User Accounts','Windows Defender Firewall',
+ 'Windows Mobility Center','Work Folders',
+];
+const ControlPanel:React.FC<{scene:Scene;progress:number}>=({scene,progress})=>{
+ if(!scene.control_panel_view)return <Window title="Control Panel">
+  <div style={{padding:'10px 22px',borderBlock:'1px solid #ddd',fontSize:17}}>←　↑　{scene.path.join('　›　')}</div>
+  <div style={{display:'flex'}}><aside style={{width:205,padding:24,color:'#0066bb',fontSize:17}}>Control Panel Home</aside><main style={{flex:1,padding:'25px 20px'}}><h1 style={{margin:'0 0 30px',fontSize:27,fontWeight:400,color:'#006600'}}>{scene.title}</h1>{scene.rows.map((row,i)=><div key={i} style={{padding:'14px 8px',fontSize:21,color:'#0066bb',background:i===scene.focus&&progress>.4?'#e5f3ff':'white'}}>{row.label}<div style={{fontSize:17,color:'#555',marginTop:5}}>{row.value}</div></div>)}</main></div>
+ </Window>;
+ const acted=progress>=.52,choose=scene.action==='choose';
+ const view=choose&&acted?scene.rows[scene.focus].value:scene.control_panel_view;
+ const category=view==='Category',small=view==='Small icons';
+ const open=scene.action==='open_dropdown'&&acted||choose&&!acted;
+ return <Window title="Control Panel">
+  <div style={{height:42,boxSizing:'border-box',padding:'10px 16px',borderBlock:'1px solid #ddd',fontSize:16}}>←　↑　Control Panel{!category?'　›　All Control Panel Items':''}</div>
+  <h1 style={{position:'absolute',left:24,top:96,margin:0,fontSize:25,fontWeight:400,color:'#006600'}}>{category?"Adjust your computer's settings":'All Control Panel Items'}</h1>
+  <div data-control-panel-view={view} style={{position:'absolute',right:18,top:108,display:'flex',gap:10,fontSize:17}}>
+   <span>View by:</span><span data-control-panel-view-button style={{width:140,color:'#0066bb'}}>{view}　⌄</span>
+  </div>
+  {open&&<div data-control-panel-view-menu style={{position:'absolute',right:18,top:138,width:140,padding:'4px 0',background:'#f2f2f2',border:'1px solid #888',boxShadow:'2px 3px 8px #0004',fontSize:17,zIndex:3}}>
+   {['Category','Large icons','Small icons'].map(option=><div key={option} data-control-panel-option={option} style={{height:32,display:'flex',alignItems:'center',paddingLeft:8,background:choose&&progress>.4&&option===scene.rows[scene.focus].value?'#cce8ff':'transparent'}}><span style={{width:18}}>{option===scene.control_panel_view?'•':''}</span>{option}</div>)}
+  </div>}
+  {category?<div data-control-panel-categories style={{position:'absolute',left:24,right:24,top:166,display:'grid',gridAutoFlow:'column',gridTemplateRows:'repeat(4,95px)',gridTemplateColumns:'1fr 1fr',columnGap:28}}>
+   {controlPanelCategories.map(([label,description],i)=><div key={label} data-control-panel-category={label} style={{display:'flex',gap:16,alignItems:'flex-start',padding:'8px 4px'}}>
+    <span style={{color:i%2?'#2b88b8':'#4a9d39',paddingTop:5}}><Glyph code={[0xe713,0xe701,0xe772,0xe8fd,0xe77b,0xe790,0xe787,0xe776][i]} size={40}/></span>
+    <div><div style={{fontSize:22,color:'#006600',lineHeight:1.15}}>{label}</div><div style={{fontSize:16,color:'#0066bb',marginTop:7}}>{description}</div></div>
+   </div>)}
+  </div>:<div data-control-panel-applets style={{position:'absolute',left:24,right:24,top:166,display:'grid',gridAutoFlow:'column',gridTemplateRows:`repeat(${Math.ceil(controlPanelApplets.length/3)},36px)`,gridTemplateColumns:'repeat(3,1fr)',columnGap:12}}>
+   {controlPanelApplets.map((label,i)=><div key={label} data-control-panel-applet={label} style={{display:'flex',gap:small?8:12,alignItems:'center',fontSize:small?15:16,lineHeight:1.1,color:'#161616',minWidth:0}}>
+    <span style={{color:['#0078d7','#387b43','#c38c1e'][i%3],width:small?18:30,flexShrink:0}}><Glyph code={label==='Mouse'?0xe962:label==='Keyboard'?0xe765:label==='Sound'?0xe767:0xe713} size={small?16:28}/></span><span>{label}</span>
+   </div>)}
+  </div>}
+ </Window>;
+};
 
 const StartMenu:React.FC<{scene:Scene;progress:number;transparent:boolean}>=({scene,progress,transparent})=><div data-win10-start data-transparency={transparent?'on':'off'} style={{position:'absolute',left:0,bottom:48,width:660,height:555,display:'flex',background:transparent?'rgba(37,37,37,.72)':'#252525',backdropFilter:transparent?'blur(18px)':'none',color:'white',boxShadow:'4px -4px 12px #0004'}}>
     <aside style={{width:54,display:'flex',flexDirection:'column',alignItems:'center',gap:30,paddingTop:22}}><Glyph code={0xe700}/><div style={{flex:1}}/><Glyph code={0xe77b}/><Glyph code={0xe713}/><Glyph code={0xe7e8}/><div/></aside>
@@ -173,33 +214,42 @@ const StartMenu:React.FC<{scene:Scene;progress:number;transparent:boolean}>=({sc
 </div>;
 
 export const PcWalkthrough:React.FC<Props>=({os,scenes,phase='solution'})=>{
- const frame=useCurrentFrame(),{durationInFrames}=useVideoConfig();
+ const frame=useCurrentFrame(),{durationInFrames,fps}=useVideoConfig();
  if(os!=='Windows 10')throw new Error('PcWalkthrough supports Windows 10 only. Update the episode before rendering.');
  const perScene=durationInFrames/scenes.length,index=Math.min(scenes.length-1,Math.floor(frame/perScene));
  const scene=scenes[index],local=frame-index*perScene,progress=local/perScene,acted=progress>=.52;
  const snap=scene.action==='snap_left'||scene.action==='snap_right';
+ const movePointer=scene.action==='move_pointer';
  const isToggle=scene.action.startsWith('toggle'),shortcut=scene.action==='shortcut'||snap,context=scene.action==='context_menu';
  const activeWindow=scene.action==='result'?scene.active_window||0:acted?scene.focus:scene.active_window||0;
  const desktop=scene.surface==='desktop',start=scene.surface==='start',clipboard=scene.surface==='clipboard';
  const changesTransparency=scene.surface==='settings'&&isToggle&&scene.rows[scene.focus]?.label==='Transparency effects';
  const transparent=changesTransparency&&acted?scene.action==='toggle_on':scene.transparency==='on';
+ const changesAutoHide=scene.surface==='settings'&&isToggle&&scene.rows[scene.focus]?.label==='Automatically hide the taskbar in desktop mode';
+ const autoHide=changesAutoHide&&acted?scene.action==='toggle_on':scene.taskbar_auto_hide==='on';
  const startTarget=context&&/start/i.test(scene.rows[scene.focus].label),home=scene.surface==='settings'&&(scene.path.length===1||scene.title==='Windows Settings');
  // Targets share the same desktop coordinate space as their actual controls.
  let target={x:385,y:26+62+68+scene.focus*106+24};
  if(isToggle)target={x:34+274+22,y:210+scene.focus*106};
- if(scene.action==='choose')target={x:34+274+105,y:217+scene.focus*106+((scene.options||[]).indexOf(scene.rows[scene.focus].value)-(scene.options||[]).indexOf(scene.before||''))*34};
+ if(scene.action==='choose'||scene.action==='open_dropdown')target={x:34+274+105,y:217+scene.focus*106+((scene.options||[]).indexOf(scene.rows[scene.focus].value)-(scene.options||[]).indexOf(scene.before||''))*34};
  if(home)target={x:150+(scene.focus%2)*410,y:247+Math.floor(scene.focus/2)*114};
  if(scene.surface==='explorer')target={x:350,y:26+176+35+(context?0:scene.focus)*48+24};
  if(clipboard)target={x:710,y:170+scene.focus*90};
  if(scene.surface==='notepad')target={x:235,y:115+scene.focus*41};
  if(scene.surface==='task_manager')target={x:330,y:204+scene.focus*56};
- if(scene.surface==='control_panel')target={x:420,y:195+scene.focus*77};
+ if(scene.surface==='control_panel')target=scene.control_panel_view
+  ?{x:820,y:scene.action==='choose'?184+['Category','Large icons','Small icons'].indexOf(scene.rows[scene.focus].value)*32:147}
+  :{x:420,y:195+scene.focus*77};
  if(desktop)target={x:49,y:137};
  if(start)target={x:200,y:166+scene.focus*53};
  if(startTarget)target={x:25,y:703};
  if(scene.surface==='windows')target={x:scene.focus===0?434:486,y:703};
  const move=interpolate(progress,[.08,.44],[0,1],{...clamp,easing:Easing.bezier(.25,.1,.25,1)});
- const cursor={x:850+(target.x-850)*move,y:575+(target.y-575)*move};
+ const pointerMove=interpolate(local,[.2*fps,.9*fps],[0,1],{...clamp,easing:Easing.bezier(.25,.1,.25,1)});
+ const cursor=movePointer?{x:500,y:704+(340-704)*pointerMove}:{x:850+(target.x-850)*move,y:575+(target.y-575)*move};
+ const taskbarOffset=movePointer?(autoHide?interpolate(local,[.9*fps,1.2*fps],[0,46],clamp):0)
+  :changesAutoHide?interpolate(progress,[.5,.6],scene.action==='toggle_off'?[46,0]:[0,46],clamp)
+  :autoHide&&!start&&!startTarget?46:0;
  const menuItems=startTarget?['Apps and Features','Power Options','Event Viewer','System','Device Manager','Network Connections','Disk Management','Computer Management','Windows PowerShell','Windows PowerShell (Admin)','Task Manager','Settings','File Explorer','Search','Run','Shut down or sign out','Desktop'].map(label=>({label,value:''})):scene.rows.filter((_,i)=>i!==scene.focus);
  const menuRowHeight=startTarget?34:43,menuHeight=menuItems.length*menuRowHeight+14;
  const menuTop=startTarget?680-menuHeight:Math.min(target.y+16,655-menuHeight);
@@ -207,9 +257,9 @@ export const PcWalkthrough:React.FC<Props>=({os,scenes,phase='solution'})=>{
  return <AbsoluteFill data-windows-version="10" style={{background:'#10161f',fontFamily:'Segoe UI,Arial,sans-serif',color:'#161616'}}>
   <div style={{position:'absolute',top:27,left:26,right:26,display:'flex',alignItems:'center',gap:13,color:'#f2f5f9',fontSize:23}}><Logo size={25}/><span>Windows 10</span><span style={{marginLeft:'auto',fontSize:18,letterSpacing:1,color:'#bfc8d2'}}>ANIMATED WALKTHROUGH</span></div>
   <div data-win10-desktop style={{position:'absolute',left:24,right:24,top:88,height:728,overflow:'hidden',background:'radial-gradient(ellipse at 75% 42%,#169be0 0%,#087bb8 26%,#005693 55%,#003b71 100%)',border:'1px solid #526273'}}>
-   <Img src={windows10Wallpaper} style={{position:'absolute',inset:0,width:'100%',height:680,objectFit:'cover'}}/>
+   <Img src={windows10Wallpaper} style={{position:'absolute',inset:0,width:'100%',height:728,objectFit:'cover'}}/>
    <div style={{position:'absolute',left:12,top:17,width:78,textAlign:'center',color:'white',fontSize:15,textShadow:'1px 1px 2px #000'}}><Glyph code={0xe74d} size={36}/><div style={{marginTop:8}}>Recycle Bin</div></div>
-   {desktop&&!startTarget&&<div style={{position:'absolute',left:12,top:105,width:100,textAlign:'center',color:'white',fontSize:16}}><Glyph code={0xe8a5} size={38}/><div>{scene.rows[scene.focus].label}</div></div>}
+   {desktop&&!startTarget&&!movePointer&&<div style={{position:'absolute',left:12,top:105,width:100,textAlign:'center',color:'white',fontSize:16}}><Glyph code={0xe8a5} size={38}/><div>{scene.rows[scene.focus].label}</div></div>}
    {scene.surface==='windows'&&<WindowLayout scene={scene} progress={progress} acted={acted}/>}
    {scene.surface==='settings'&&<Settings scene={scene} acted={acted} progress={progress}/>}
    {scene.surface==='explorer'&&<Explorer scene={scene} acted={acted} progress={progress}/>}
@@ -221,7 +271,7 @@ export const PcWalkthrough:React.FC<Props>=({os,scenes,phase='solution'})=>{
     {scene.rows.map((row,i)=><div key={i} style={{position:'relative',background:'white',border:'1px solid '+(i===scene.focus?'#777':'#ccc'),minHeight:66,marginBottom:12,padding:'12px 24px 12px 12px',fontSize:19,boxSizing:'border-box'}}>{row.label}<span style={{position:'absolute',right:8,top:2}}>···</span>{row.value&&<div style={{fontSize:16,color:'#555'}}>{row.value}</div>}</div>)}
    </div>}
    {start&&(!shortcut||acted)&&<StartMenu scene={scene} progress={progress} transparent={transparent}/>}
-   <div data-win10-taskbar data-transparency={transparent?'on':'off'} style={{position:'absolute',bottom:0,left:0,right:0,height:48,background:transparent?'rgba(25,25,25,.78)':'#191919',backdropFilter:transparent?'blur(18px)':'none',color:'white',display:'flex',alignItems:'center',fontSize:15}}>
+   <div data-win10-taskbar data-auto-hide={autoHide?'on':'off'} data-transparency={transparent?'on':'off'} style={{position:'absolute',bottom:-taskbarOffset,left:0,right:0,height:48,background:transparent?'rgba(25,25,25,.78)':'#191919',backdropFilter:transparent?'blur(18px)':'none',color:'white',display:'flex',alignItems:'center',fontSize:15}}>
     <span data-win10-start-button style={{height:48,width:50,display:'grid',placeItems:'center',background:startTarget&&progress>.4?'#414141':'transparent'}}><Logo size={22}/></span>
     <div style={{height:48,width:245,boxSizing:'border-box',background:'#f4f4f4',color:'#444',display:'flex',alignItems:'center',gap:15,padding:'0 15px',fontSize:17}}><Glyph code={0xe721} size={19}/>Type here to search</div>
     <span style={{padding:'0 19px'}}><Glyph code={0xe7c4}/></span><span style={{height:48,display:'grid',placeItems:'center',width:53,borderBottom:scene.surface==='explorer'?'3px solid #76b9ed':'3px solid transparent',boxSizing:'border-box'}}><Folder size={25}/></span>
@@ -232,7 +282,7 @@ export const PcWalkthrough:React.FC<Props>=({os,scenes,phase='solution'})=>{
     {menuItems.map((row,i)=><div key={i} style={{height:menuRowHeight,display:'flex',alignItems:'center',paddingLeft:26,fontSize:startTarget?17:19,borderTop:startTarget&&['Task Manager','Shut down or sign out','Desktop'].includes(row.label)?'1px solid #555':undefined}}>{row.label}</div>)}
    </div>}
    {!shortcut&&scene.action!=='result'&&scene.action!=='calculate'&&<div data-win10-cursor style={{position:'absolute',left:cursor.x,top:cursor.y,zIndex:5,pointerEvents:'none'}}>
-    {progress>=.5&&progress<.64&&<div style={{position:'absolute',left:-13,top:-13,width:32,height:32,border:'2px solid #ffbb00',borderRadius:'50%',scale:String(interpolate(progress,[.5,.64],[.5,1.3],clamp)),opacity:interpolate(progress,[.5,.64],[1,0],clamp)}}/>}
+    {!movePointer&&progress>=.5&&progress<.64&&<div style={{position:'absolute',left:-13,top:-13,width:32,height:32,border:'2px solid #ffbb00',borderRadius:'50%',scale:String(interpolate(progress,[.5,.64],[.5,1.3],clamp)),opacity:interpolate(progress,[.5,.64],[1,0],clamp)}}/>}
     <svg width="25" height="32" viewBox="0 0 25 32"><path d="M2 1v24l6-6 5 11 5-2-5-10h9z" fill="white" stroke="#111" strokeWidth="1.5"/></svg>
    </div>}
   </div>
@@ -248,7 +298,7 @@ export const PcWalkthrough:React.FC<Props>=({os,scenes,phase='solution'})=>{
 registerRoot(()=><Composition id="PcWalkthrough" component={PcWalkthrough} fps={30} width={1024} height={960}
  durationInFrames={240} calculateMetadata={({props})=>{
   if(props.os!=='Windows 10')throw new Error('PcWalkthrough supports Windows 10 only. Update the episode before rendering.');
-  return {durationInFrames:props.frames};
+  return {durationInFrames:Math.max(props.frames,props.scenes.some(scene=>scene.action==='move_pointer')?5*30*props.scenes.length:1)};
  }}
  defaultProps={{os:'Windows 10',frames:240,scenes:[{
   surface:'settings',title:'Keyboard',path:['Settings','Ease of Access','Keyboard'],

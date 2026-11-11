@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import prepare_assets as assets
 
@@ -221,6 +221,63 @@ class GameplayPreparationTests(unittest.TestCase):
                 self.assertGreaterEqual(start, 0)
                 self.assertLessEqual(start + duration, length)
         self.assertEqual(assets.clip_ranges(1200, 20), (300, 720, 20))
+
+
+class SectionDownloadRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.dest = Path(self.temp.name) / 'clip.mp4'
+        self.info = {'duration': 75, 'webpage_url': 'https://www.youtube.com/watch?v=sample', 'url': 'old-stream'}
+        self.attempts = []
+        self.failures = []
+        self.addCleanup(patch.stopall)
+        self.fetch = patch.object(assets, 'fetch_video_info', return_value={**self.info, 'url': 'fresh-stream'}).start()
+        patch.object(assets, 'get_video_duration', side_effect=GameplayPreparationTests.fake_duration).start()
+        patch.object(assets, 'log').start()
+        patch('yt_dlp.YoutubeDL', side_effect=self.downloader).start()
+
+    def downloader(self, options):
+        manager = MagicMock()
+        def process(info, download):
+            self.attempts.append(info['url'])
+            pending = Path(options['outtmpl'])
+            pending.write_text('2' if self.failures and self.failures[0] == 'partial' else '10')
+            if self.failures:
+                failure = self.failures.pop(0)
+                if failure != 'partial': raise failure
+        manager.__enter__.return_value.process_ie_result.side_effect = process
+        return manager
+
+    def test_failed_stream_refreshes_link_and_publishes_only_complete_retry(self):
+        from yt_dlp.utils import DownloadError
+        self.failures = [DownloadError('ffmpeg exited with code 3436169992')]
+        self.assertTrue(assets.download_youtube(self.info, 18.75, 10, self.dest))
+        self.assertEqual(self.attempts, ['old-stream', 'fresh-stream'])
+        self.fetch.assert_called_once_with(self.info['webpage_url'])
+        self.assertEqual(self.dest.read_text(), '10')
+        self.assertEqual(list(self.dest.parent.glob('.download-*')), [])
+
+    def test_incomplete_section_is_retried_without_caching_partial_media(self):
+        self.failures = ['partial']
+        self.assertTrue(assets.download_youtube(self.info, 18.75, 10, self.dest))
+        self.assertEqual(self.attempts, ['old-stream', 'fresh-stream'])
+        self.assertEqual(self.dest.read_text(), '10')
+
+    def test_persistent_failure_is_bounded_and_preserves_existing_clip(self):
+        from yt_dlp.utils import DownloadError
+        self.dest.write_text('existing clip')
+        self.failures = [DownloadError('HTTP Error 403')] * 3
+        self.assertFalse(assets.download_youtube(self.info, 18.75, 10, self.dest))
+        self.assertEqual(len(self.attempts), 3)
+        self.assertEqual(self.fetch.call_count, 2)
+        self.assertEqual(self.dest.read_text(), 'existing clip')
+        self.assertEqual(list(self.dest.parent.glob('.download-*')), [])
+
+    def test_success_reuses_preflight_stream_without_repeating_extraction(self):
+        self.assertTrue(assets.download_youtube(self.info, 18.75, 10, self.dest))
+        self.fetch.assert_not_called()
+        self.assertEqual(self.attempts, ['old-stream'])
 
 
 if __name__ == '__main__':
