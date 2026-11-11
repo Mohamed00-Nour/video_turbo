@@ -197,5 +197,20 @@ class StudioRecreateTests(unittest.TestCase):
         self.assertEqual(read_cache(path / 'reference_style.json')['status'], 'script_review')
 
 
+    def test_source_that_is_a_saved_style_video_is_flagged(self):
+        import style_library as lib
+        style_dir = lib.folder(self.app.data, self.style); (style_dir / 'source.mp4').write_bytes(b'style video bytes')
+        value = read_cache(style_dir / 'style.json'); value['source_file'] = 'source.mp4'; write_json(style_dir / 'style.json', value)
+        project = self.create(); path = Path(project['path']); (path / 'reference/source').mkdir(parents=True)
+        same = path / 'reference/source/upload-1.mp4'; same.write_bytes(b'style video bytes')
+        other = path / 'reference/source/upload-2.mp4'; other.write_bytes(b'other video bytes')
+        self.assertEqual(lib.matching_source(self.app.data, same), 'Dark')
+        self.assertEqual(lib.matching_source(self.app.data, other), '')
+        state = read_cache(path / 'reference_style.json'); state['recreate']['source_file'] = 'reference/source/upload-1.mp4'
+        write_json(path / 'reference_style.json', state)
+        self.assertEqual(self.app.reference_state(project['id'])['recreate']['source_matches_style'], 'Dark')
+        self.assertEqual(read_cache(path / 'reference_style.json')['recreate']['source_matches_style'], 'Dark')  # checked once, then saved
+
+
 if __name__ == '__main__':
     unittest.main()

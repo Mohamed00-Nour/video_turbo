@@ -358,6 +358,23 @@ def analyze(data, style_id):
         raise
 
 
+def matching_source(data, path):
+    """Name of a saved style whose reference video is this exact file, or ''.
+
+    Catches a common mix-up: uploading a style's video as the video whose idea should be recreated.
+    """
+    from pipeline_common import file_digest
+    path = Path(path); size = path.stat().st_size; digest = None
+    base = root(data)
+    for folder_path in sorted(base.iterdir()) if base.is_dir() else []:
+        value = read_cache(folder_path / 'style.json')
+        source = _inside(folder_path, value.get('source_file', '')) if value.get('id') == folder_path.name else None
+        if source and source.stat().st_size == size:
+            digest = digest or file_digest(path)
+            if file_digest(source) == digest: return value.get('name', 'a saved style')
+    return ''
+
+
 def snapshot(data, ids):
     """Copy the chosen saved styles into a project, so later library edits never break it silently."""
     if not isinstance(ids, list) or not 1 <= len(ids) <= MAX_STYLES or len(set(ids)) != len(ids):

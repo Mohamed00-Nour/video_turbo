@@ -366,6 +366,12 @@ class Studio:
         path = self.project(identifier)
         state = read_cache(path / 'reference_style.json')
         if not state: return {}
+        source = state.get('recreate')
+        if isinstance(source, dict) and source.get('source_file') and 'source_matches_style' not in source:
+            # Projects created before this check: compare their source once with the saved style videos.
+            try: source['source_matches_style'] = style_library.matching_source(self.data, recreate.source_path(path, state))
+            except (OSError, ValueError): source['source_matches_style'] = ''
+            write_json(path / 'reference_style.json', state)
         state = copy.deepcopy(state)
         script = (path / 'script.txt').read_text('utf-8-sig').strip() if (path / 'script.txt').is_file() else ''
         stale = state.get('script_hash') != fingerprint(script)
@@ -1346,7 +1352,8 @@ class Handler(BaseHTTPRequestHandler):
                         write_json(project / 'reference_style.json', reference)
                     if role == 'source':
                         reference = read_cache(project / 'reference_style.json')
-                        reference['recreate'].update(source_file=target.relative_to(project).as_posix(), source_url='')
+                        reference['recreate'].update(source_file=target.relative_to(project).as_posix(), source_url='', source_name=name[:200],
+                                                     source_matches_style=style_library.matching_source(self.studio.data, target))
                         if reference.get('status') == 'script_review': reference.update(draft_script='')
                         reference.update(status='awaiting_inputs', error='')
                         write_json(project / 'reference_style.json', reference)

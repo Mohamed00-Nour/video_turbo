@@ -178,6 +178,8 @@
   app.install(project);$('reference-dialog').close();await app.refreshState();
   for(const [role,file] of files){app.toast('Uploading '+file.name+'...');await upload(file,role);}
   if(recreating){
+   const match=app.getState().project?.reference_style?.recreate?.source_matches_style;
+   if(match){app.toast('Project created. The source video is the same file as your style "'+match+'", so drafting has not started. Check the source, then click Analyze source & draft script.',true);await connection();return;}
    // Every input for the draft is ready, so start it now; the script still waits for approval.
    try{
     const result=await app.api('/api/reference/start',{id:project.id,build:false,provider});

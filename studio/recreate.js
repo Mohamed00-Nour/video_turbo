@@ -34,7 +34,11 @@
   const ref=project?.reference_style,source=ref?.recreate;
   $('recreate-panel').hidden=!source;
   if(!source)return;
-  $('recreate-source-name').textContent=source.source_file?'Source video: '+source.source_file.split('/').pop():source.source_url?'Source link: '+source.source_url:'Add the source video to recreate.';
+  $('recreate-source-name').textContent=source.source_file?'Idea from: '+(source.source_name || source.source_file.split('/').pop()):source.source_url?'Idea from: '+source.source_url:'Add the source video to recreate.';
+  const player=$('recreate-player');player.hidden=!source.source_file;
+  if(source.source_file){const src=app.mediaUrl(source.source_file,project.id);if(player.getAttribute('src')!==src)player.src=src;}
+  $('recreate-warning').hidden=!source.source_matches_style;
+  $('recreate-warning').textContent=source.source_matches_style?'This is the same video file as your saved style "'+source.source_matches_style+'". Its idea will be recreated. If you meant a different video, use Replace source video, then draft again.':'';
   const breakdown=source.breakdown;
   $('recreate-breakdown').hidden=!breakdown;
   if(breakdown){
