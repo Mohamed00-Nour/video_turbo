@@ -9,6 +9,8 @@
  const providerName=key=>key==='codex'?'Codex / ChatGPT':key==='claude'?'Claude':'Antigravity Gemini';
  // Codex and Claude accept a blank model: the client then uses its own configured default.
  const blankDefault=key=>key==='codex' || key==='claude';
+ // claude-opus-5-5 -> Claude Opus 5.5; other model IDs are shown as returned.
+ const modelName=id=>{const m=/^claude-([a-z]+)-(\d+)-(\d+)/.exec(id || '');return m?'Claude '+m[1][0].toUpperCase()+m[1].slice(1)+' '+m[2]+'.'+m[3]:id;};
  const modelLabel=key=>key==='codex'?'Codex model':key==='claude'?'Claude model':'Gemini model';
  const modelStates={};
  const modelRequests={};
@@ -63,7 +65,9 @@
   window.VideoTurboFlow?.update(project);
   $('reference-panel').hidden=!ref || !Object.keys(ref).length;
   if($('reference-panel').hidden)return;
-  $('reference-provider-badge').textContent=providerName(ref.analysis?ref.provider:$('reference-provider').value);
+  const usedModel=ref.model_id || ref.draft_metadata?.model || '';
+  $('reference-provider-badge').textContent=usedModel?modelName(usedModel):providerName(ref.analysis?ref.provider:$('reference-provider').value);
+  $('reference-provider-badge').title=usedModel?'Model that produced the current script or scene plan: '+usedModel:'Provider that produced the current saved style analysis';
   const state=app.getState();
   const active=state.job?.project===project.id && ['running','cancelling'].includes(state.job.status);
   const recreating=window.VideoTurboRecreate?.drafting(project);

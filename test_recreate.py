@@ -214,3 +214,46 @@ class StudioRecreateTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class QuickFixTests(unittest.TestCase):
+    def test_claude_runs_at_high_effort_and_reports_its_model(self):
+        signed_in = type('R', (), {'returncode': 0, 'stdout': json.dumps({'loggedIn': True, 'authMethod': 'claude.ai'}), 'stderr': ''})()
+        events = [{'type': 'system', 'subtype': 'init', 'model': 'claude-opus-5-5'},
+                  {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '{}', 'structured_output': {'ok': True}}]
+        answer = type('R', (), {'returncode': 0, 'stdout': '\n'.join(json.dumps(e) for e in events), 'stderr': ''})()
+        with tempfile.TemporaryDirectory() as folder, patch.object(ref.subprocess, 'run', side_effect=[signed_in, answer]) as run:
+            value, meta = ref.ask_claude({'cli_path': 'claude.exe', 'model': 'opus'}, folder, 'Plan', {'type': 'object'})
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index('--effort') + 1], 'high')
+        self.assertEqual(meta['model'], 'claude-opus-5-5')
+        with patch.object(ref.subprocess, 'run', side_effect=[signed_in, answer]) as run:
+            ref.ask_claude({'cli_path': 'claude.exe'}, '.', 'Reply READY')
+        self.assertNotIn('--effort', run.call_args.args[0])  # quick connection checks stay light
+
+    def test_planner_receives_source_and_style_frames(self):
+        import style_library as lib
+        with tempfile.TemporaryDirectory() as folder:
+            data = Path(folder) / 'data'; style_id = ready_style(data, 'Dark')
+            frames = lib.folder(data, style_id) / 'reference/frames'; frames.mkdir(parents=True)
+            for name in ('sheet-01.jpg', 'sheet-02.jpg', 'sheet-03.jpg'): (frames / name).write_bytes(b'jpg')
+            project = Path(folder) / 'project'; (project / 'reference/source/frames').mkdir(parents=True)
+            (project / 'reference/source/frames/sheet-01.jpg').write_bytes(b'jpg')
+            source = recreate.planning_images(project, {'recreate': {}})
+            styles = lib.planning_images(data, project, [{'id': style_id, 'name': 'Dark'}])
+            self.assertEqual([row['path'] for row in source], ['reference/source/frames/sheet-01.jpg'])
+            self.assertEqual([row['path'] for row in styles], ['reference/styles/A-01.jpg', 'reference/styles/A-02.jpg'])
+            self.assertIn('"Dark"', styles[0]['shows'])
+            self.assertEqual(recreate.planning_images(project, {}), [])
+
+    def test_broken_image_link_falls_back_to_typography(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); (root / 'media').mkdir()
+            plan = valid_plan()
+            plan['assets'] = [{'id': 'logo', 'kind': 'image', 'source': 'https://example.com/logo.png', 'start_seconds': 0, 'duration_seconds': 1}]
+            plan['scenes'][0].update(media='logo', variant='hero')
+            write_json(root / 'config.json', {}); write_json(root / 'studio.json', {'name': 'x', 'mode': 'sections'})
+            with patch('logo_assets.fetch_reference_image', side_effect=ValueError('not an image')):
+                ref.finish_preparation(root, plan, {})
+            scene = read_cache(root / 'config.json')['sections'][0]
+            self.assertEqual(scene['variant'], 'type'); self.assertEqual(scene['media'], '')

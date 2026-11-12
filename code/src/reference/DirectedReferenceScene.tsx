@@ -80,7 +80,7 @@ export const DirectedReferenceScene: React.FC<{block:any; visibility?:number}> =
       {details[0] && <div dir="auto" style={{position:'absolute',left:110,right:110,top:1410,textAlign:'center',color:muted,fontFamily:sans,fontSize:40,opacity:reveal(4)}}>{details[0]}</div>}
     </>}
     {variant==='device' && <>
-      <div style={{position:'absolute',left:300,top:graphicY-35+float,rotate:`${-7+progress*8}deg`,scale:.93+.07*move,opacity:move,translate:`0px ${(1-move)*100}px`}}><Phone accent={accent} ink={dark?'#F5F5F2':'#171917'} paper={dark?'#171a19':'#fafbf8'} progress={progress} motif={motif} details={details} reveals={details.map((_:string,i:number)=>detailReveal(i))}/></div>
+      <div style={{position:'absolute',left:300,top:graphicY-35+float,rotate:`${-7+progress*8}deg`,scale:.93+.07*move,opacity:move,translate:`0px ${(1-move)*100}px`}}><Phone accent={accent} ink={dark?'#F5F5F2':'#171917'} paper={dark?'#171a19':'#fafbf8'} progress={progress} motif={motif} title={block.emphasis || ''} details={details} reveals={details.map((_:string,i:number)=>detailReveal(i))}/></div>
       {motif==='privacy' && details.slice(0,3).map((text:string,i:number)=>tile(text,i,i%2===0?55:660,810+i*205,350))}
       {motif!=='privacy' && <div style={{position:'absolute',left:760,top:1060-float,color:accent,background:panel,padding:24,borderRadius:30,boxShadow:castShadow,opacity:reveal(6),rotate:'9deg'}}><Glyph kind={icon} size={95}/></div>}
     </>}

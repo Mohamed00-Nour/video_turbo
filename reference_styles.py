@@ -368,6 +368,8 @@ def ask_claude(config, project, prompt, schema=None, timeout=600, *, images=(), 
                '--no-session-persistence', '--tools', CLAUDE_TOOLS, '--allowedTools', CLAUDE_TOOLS,
                '--permission-mode', 'dontAsk', '--output-format', 'stream-json', '--verbose']
     if config.get('model'): command += ['--model', config['model']]
+    effort = config.get('effort', 'high' if schema else '')
+    if effort in ('low', 'medium', 'high', 'xhigh', 'max'): command += ['--effort', effort]
     required = [Path(path).resolve() for path in images]
     optional = []
     if schema:
@@ -387,7 +389,7 @@ def ask_claude(config, project, prompt, schema=None, timeout=600, *, images=(), 
     if optional:
         prompt += '\nThe uploaded images are also available to Read:\n' + '\n'.join(str(path) for path in optional)
     result = subprocess.run(command, cwd=project, input=prompt, timeout=timeout + 30, **options)
-    envelope, reads, failed = None, {}, set()
+    envelope, reads, failed, model_id = None, {}, set(), ''
     for line in result.stdout.splitlines():
         try: event = json.loads(line)
         except ValueError: continue
@@ -400,6 +402,7 @@ def ask_claude(config, project, prompt, schema=None, timeout=600, *, images=(), 
                 reads[item.get('id')] = os.path.normcase(str((project / item['input']['file_path']).resolve()))
             if item.get('type') == 'tool_result' and item.get('is_error'):
                 failed.add(item.get('tool_use_id'))
+        if event.get('type') == 'system' and event.get('subtype') == 'init' and isinstance(event.get('model'), str): model_id = event['model']
         if event.get('type') == 'result': envelope = event
     if result.returncode or not envelope or envelope.get('is_error') or envelope.get('subtype') != 'success':
         detail = (str((envelope or {}).get('result', '')) + ' ' + str((envelope or {}).get('subtype', '')) + ' ' + result.stderr).lower()
@@ -413,7 +416,7 @@ def ask_claude(config, project, prompt, schema=None, timeout=600, *, images=(), 
     viewed = {path for key, path in reads.items() if key not in failed}
     if not {os.path.normcase(str(path)) for path in required} <= viewed:
         raise ValueError('Claude could not confirm that it opened every reference image. Retry the analysis.')
-    metadata = {'session_id': envelope.get('session_id', ''), 'usage': envelope.get('usage', {}),
+    metadata = {'model': model_id, 'effort': effort, 'session_id': envelope.get('session_id', ''), 'usage': envelope.get('usage', {}),
                 'num_turns': envelope.get('num_turns', 0), 'duration_seconds': (envelope.get('duration_ms') or 0) / 1000}
     if schema:
         value = envelope.get('structured_output')
@@ -650,7 +653,9 @@ def prepare_assets(project, plan):
                 if asset['kind']=='image':
                     log('Downloading image '+asset['id'])
                     try: fetch_reference_image(asset['source'],pending)
-                    except ValueError as error: raise ValueError('Asset '+asset['id']+': '+str(error)) from error
+                    except ValueError as error:
+                        log('Skipped image '+asset['id']+' (its scene uses typography instead): '+str(error))
+                        continue
                 else:
                     info=fetch_video_info(asset['source'])
                     if not download_youtube(info,asset['start_seconds'],asset['duration_seconds'],pending):
@@ -700,6 +705,8 @@ def finish_preparation(project, plan, state):
     resolved=prepare_assets(project,plan)
     sections=[]
     for row in plan['scenes']:
+        if row.get('media') and row['media'] not in resolved and row.get('variant') in ('hero','card','collage','compare'):
+            row={**row,'variant':'type','media':''}
         sections.append({**row,'layout':'reference_style','media':resolved.get(row['media'],''),
                          'secondary_media':resolved.get(row['secondary_media'],''),
                          'caption_y':plan['analysis']['caption_y'],'zoom':1.04,'offset_seconds':0})
@@ -762,6 +769,9 @@ def run_project(project, data):
         if library: context.update(style_library.planning_context(state['library_styles'],state.get('style_mix',{})))
         else: context['reference']=sampled
         context.update(recreate.planning_context(state))
+        if library:
+            images=recreate.planning_images(project,state)+style_library.planning_images(data,project,state['library_styles'])
+            if images: context['reference']={'sheets':[row['path'] for row in images],'descriptions':images}
         write_json(project/'reference/context.json',context)
         prompt=((style_library.PLANNING_PROMPT if library else
                  'You are the Reference Styles director for Video Turbo. Read reference/context.json and VIEW EVERY contact sheet listed in reference.sheets; '
@@ -807,6 +817,7 @@ def run_project(project, data):
                 'Return only the requested structured output. Do not write files or modify the project.')
         log(PROVIDER_NAMES[provider]+' analyzing style and planning new scenes ('+selected_model+')')
         plan,metadata=ask_provider(connection,project,prompt,SCHEMA)
+        if metadata.get('model'): log('Scene plan written by '+metadata['model'])
         # Saved-style choices are applied after the AI answers, so it cannot override them.
         if library: style_library.apply_mix(plan,state['library_styles'],state.get('style_mix',{}))
         for note in normalize_analysis(plan.get('analysis') if isinstance(plan,dict) else None):
@@ -816,7 +827,7 @@ def run_project(project, data):
         plan['analysis']['renderer_version']=3
         write_json(project/'reference/plan.json',plan)
         log('Preparing assets selected by '+PROVIDER_NAMES[provider])
-        state.update(status='preparing_assets',analysis=plan['analysis'],model=selected_model,provider=provider,
+        state.update(status='preparing_assets',analysis=plan['analysis'],model=selected_model,model_id=metadata.get('model',''),provider=provider,
                      script_hash=fingerprint(script),reference_signature=file_signature(reference) if reference else None,voice_signature=file_signature(voice),
                      metadata=metadata,sampled=sampled,plan_inputs=inputs,plan_hash=fingerprint(plan),error='')
         write_json(state_path,state)

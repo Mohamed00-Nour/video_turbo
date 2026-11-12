@@ -122,6 +122,13 @@ PLANNING_PROMPT = (
     'fields in each category. Plan scenes with the layouts preferences of the style chosen for layouts, and the transition_style '
     'of the style chosen for transitions, or combine both styles for mix. Prefer the earlier entries of each preference list. '
     'Where the instructions below mention the reference, they mean these saved styles. '
+    'If reference.sheets lists images, VIEW EVERY one before planning; reference.descriptions says what each shows '
+    '(frames of the source video being recreated, or frames of a saved style in motion). Match the style frames for the look, '
+    'and the source frames for what each moment shows. '
+    'When the narration names real tools, apps, products, websites or brands, use web search to find each one\'s official logo '
+    'or a real screenshot and add it as an image asset with a direct image URL (PNG, JPG or WebP file, not a web page). '
+    'Prefer official sites and Wikimedia Commons. Show these real visuals in hero, card, collage or compare scenes instead of '
+    'only text, and reuse an asset when the narration returns to the same thing. '
 )
 
 
@@ -340,6 +347,7 @@ def analyze(data, style_id):
         log(ref.PROVIDER_NAMES[provider] + ' is breaking down the style (' + (connection.get('model') or 'configured default') + ')')
         answer, metadata = ref.ask_provider(connection, path, prompt, STYLE_SCHEMA)
         write_json(path / 'reference/last-answer.json', answer)  # Kept for troubleshooting a rejected breakdown.
+        if metadata.get('model'): log('Breakdown written by ' + metadata['model'])
         for note in ref.normalize_analysis(answer.get('analysis') if isinstance(answer, dict) else None):
             log('Adjusted to the supported range: ' + note)
         try: profile = validate_profile(answer)
@@ -373,6 +381,23 @@ def matching_source(data, path):
             digest = digest or file_digest(path)
             if file_digest(source) == digest: return value.get('name', 'a saved style')
     return ''
+
+
+def planning_images(data, project, styles, per_style=2):
+    """Copy a few frames of each saved style into the project so the planner can view them."""
+    rows = []
+    for index, row in enumerate(styles):
+        try: source = folder(data, row['id'])
+        except ValueError: continue
+        frames = sorted((source / 'reference/frames').glob('sheet-*.jpg'))[:per_style] or \
+                 [path for path in [source / 'thumb.jpg'] if path.is_file()]
+        for number, frame in enumerate(frames, 1):
+            target = Path(project) / 'reference/styles' / f'{"AB"[index]}-{number:02d}.jpg'
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(frame, target)
+            rows.append({'path': target.relative_to(project).as_posix(),
+                         'shows': f'Style {"AB"[index]} "{row["name"]}" in motion (timestamped frames)'})
+    return rows
 
 
 def snapshot(data, ids):
