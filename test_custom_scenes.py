@@ -65,6 +65,19 @@ class CodeCheckTests(unittest.TestCase):
             self.assertFalse((target / 'scenes/stale.tsx').exists())
 
 
+    def test_word_by_word_text_keeps_english_runs_in_order(self):
+        import shutil, subprocess
+        self.assertIn('wordGroups(line)', cs.RULES)
+        node = shutil.which('node')
+        if not node: self.skipTest('node is not installed')
+        kit = (cs.CODE / 'src/custom/kit.ts').read_text(encoding='utf-8')
+        start = kit.index('const RTL_LETTER')
+        source = kit[start:].replace('export const', 'const').replace('(line: string)', '(line)').replace(': string[] =', ' =')
+        script = source + '\nconsole.log(JSON.stringify([wordGroups("حمّل Claude Desktop الآن"), wordGroups("Open Claude Desktop")]));'
+        result = subprocess.run([node, '-'], input=script, capture_output=True, text=True, encoding='utf-8', timeout=30)
+        self.assertEqual(json.loads(result.stdout), [['حمّل', 'Claude Desktop', 'الآن'], ['Open', 'Claude', 'Desktop']])
+
+
 class GenerateTests(unittest.TestCase):
     def run_generate(self, root, plan, state, draws, checks, review=None):
         replies = iter(draws + [review or ({}, {})])

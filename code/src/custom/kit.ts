@@ -28,3 +28,24 @@ export const wordFrame = (words: SceneWord[], phrase: string, fallback = 0) => {
   const hit = words.find((word) => word.text.replace(/[^\p{L}\p{N}]/gu, '') === target.replace(/[^\p{L}\p{N}]/gu, ''));
   return hit ? hit.frame : fallback;
 };
+
+const RTL_LETTER = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/;
+
+/**
+ * Split a line into words for word-by-word animation. Runs of non-Arabic words (e.g. "Claude Desktop")
+ * inside Arabic text stay together as one group: animating them separately in right-to-left layout reverses
+ * their order. Lines without Arabic are split into single words.
+ */
+export const wordGroups = (line: string) => {
+  const words = line.trim().split(/\s+/).filter(Boolean);
+  if (!RTL_LETTER.test(line)) return words;
+  const groups: string[] = [];
+  let latin = false;
+  for (const word of words) {
+    const isLatin = !RTL_LETTER.test(word);
+    if (isLatin && latin && groups.length) groups[groups.length - 1] += ' ' + word;
+    else groups.push(word);
+    latin = isLatin;
+  }
+  return groups;
+};

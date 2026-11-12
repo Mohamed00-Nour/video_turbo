@@ -852,6 +852,36 @@ adapt a video's idea before publishing.
 python -m unittest -v test_recreate
 ```
 
+### Claude draws each scene
+
+Built-in templates (text, phone, checklist, number, photo cards…) are fast but
+look similar from scene to scene. For **Video Turbo animation** projects with the
+**Claude** provider, choose **Scene visuals → Claude draws each scene** in the
+creation dialog or in the project's Reference panel. **Analyze & plan scenes** then:
+
+1. Plans the scenes as before (timing, headings, details and real images). Saved-style
+   plans now include frames of each style and, for recreated videos, of the source,
+   and Claude looks for official logos and screenshots of named tools and products.
+   Broken image links are skipped instead of stopping the build.
+2. Claude writes one animation (a Remotion component) per scene, four scenes per
+   request, while viewing the style and source frames. Scenes may import only
+   `react`, `remotion` and the small kit in `code/src/custom/kit.ts`. Code that uses
+   the network, storage, timers, randomness, the clock or the page is rejected.
+3. Every scene is test-rendered. Failures go back to Claude with the error, up to two
+   times. Claude then reviews the rendered middle frames once and fixes layout problems;
+   a review change that breaks a scene is discarded.
+4. Any scene that still fails keeps its built-in template, so the build never breaks.
+   The panel shows how many scenes Claude drew and with which model.
+
+**Draw scenes again with Claude** redraws from the saved plan without a new analysis.
+Switching back to **Built-in templates** keeps Claude's files but renders templates.
+Drawing takes several minutes and uses your Claude plan's usage. Scenes live in the
+project's `custom-scenes/` folder; test frames are in `custom-scenes/frames/`.
+
+```powershell
+python -m unittest -v test_custom_scenes
+```
+
 ### Claude as an AI provider
 
 Claude appears in the provider lists for Reference Styles and the Style Library.

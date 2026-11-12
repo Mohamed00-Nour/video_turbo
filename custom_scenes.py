@@ -22,7 +22,7 @@ from video_sections import IMAGE_EXTS, public_media
 ENGINE = Path(__file__).resolve().parent
 CODE = ENGINE / 'code'
 SCENE_DIR = 'custom-scenes'
-KIT_VERSION = 1
+KIT_VERSION = 2
 BATCH = 4
 WORKERS = 2
 REPAIR_ROUNDS = 2
@@ -40,7 +40,7 @@ Write one complete TSX module per requested scene. Each module must look like:
 
 import React from 'react';
 import {AbsoluteFill, Img, interpolate, spring, Easing, useCurrentFrame, useVideoConfig} from 'remotion';
-import {progress, wordFrame, type SceneProps} from '../kit';
+import {progress, wordFrame, wordGroups, type SceneProps} from '../kit';
 export default function Scene({text, words, palette, fonts, images, captionTop, durationInFrames}: SceneProps) {
   const frame = useCurrentFrame();
   ...
@@ -56,6 +56,8 @@ Rules:
 - Keep all important content above captionTop (pixels from the top); the app draws spoken captions below it. Keep 60px side margins.
 - Use fonts.heading for headlines and fonts.body for other text. Both support Arabic. Put dir="auto" on text elements.
   Never use letter-spacing or per-letter animation on Arabic text, and never split Arabic words into letters.
+  To animate a line word by word, split it with wordGroups(line), never with line.split(' '): separate flex items
+  for consecutive English words ("Claude Desktop") show in reversed order inside right-to-left text.
 - Show text.title as the scene headline and highlight text.emphasis inside it with palette.accent when present.
   Reveal text.details and visual beats in sync with the narration: words[i].frame is when a word is spoken in this scene.
 - Draw icons, app windows, folders, logos, charts and illustrations yourself with inline SVG and styled divs, or use the
