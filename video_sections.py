@@ -85,6 +85,14 @@ def validate_sections(config, project):
         for key in ('media', 'secondary_media'):
             if section.get(key):
                 media_path(project, section[key])
+        if 'custom_scene' in section:
+            if layout != 'reference_style' or not isinstance(section['custom_scene'], str) or not re.fullmatch(r'scene-\d{2,3}', section['custom_scene']):
+                raise ValueError('Invalid custom scene.')
+            images = section.get('custom_images', {})
+            if not isinstance(images, dict) or len(images) > 30 or any(not re.fullmatch(r'[a-zA-Z0-9_-]{1,50}', str(key)) for key in images):
+                raise ValueError('Invalid custom scene images.')
+            for relative in images.values():
+                if media_path(project, relative).suffix.lower() not in IMAGE_EXTS: raise ValueError('Custom scene images must be pictures.')
         if layout == 'flow_clip':
             if 'flow_text' in section: validate_flow_text(section['flow_text'])
             if not section.get('media') or media_path(project, section['media']).suffix.lower() not in VIDEO_EXTS:
@@ -218,6 +226,11 @@ def make_timeline(config, project, public, words, duration, probe, fps=30):
             block['referenceStyle'] = config.get('reference_style', {})
             block['variant'] = section.get('variant', 'card')
             block['detailFrames'] = reference_detail_frames(section, words, starts[i], starts[i+1]-starts[i], fps)
+            if section.get('custom_scene'):
+                # Scenes Claude wrote get their own spoken words and images.
+                block['sceneWords'] = [{'text': w['word'], 'frame': round(float(w['start']) * fps) - starts[i]} for w in words
+                                       if starts[i] <= round(float(w['start']) * fps) < starts[i + 1]]
+                block['customImages'] = {key: public_media(value) for key, value in section.get('custom_images', {}).items()}
         blocks.append(block)
     processed = [{'word': w['word'], 'start': w['start'], 'end': w['end'],
                   'startFrame': round(w['start'] * fps),

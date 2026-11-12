@@ -710,6 +710,7 @@ def finish_preparation(project, plan, state):
         sections.append({**row,'layout':'reference_style','media':resolved.get(row['media'],''),
                          'secondary_media':resolved.get(row['secondary_media'],''),
                          'caption_y':plan['analysis']['caption_y'],'zoom':1.04,'offset_seconds':0})
+    state['resolved_assets']=resolved
     config=read_cache(project/'config.json');config.update(sections=sections,reference_style=plan['analysis'])
     config.pop('games',None);write_json(project/'config.json',config)
     editor=read_cache(project/'studio.json');editor.update(mode='sections',sections=sections,games=[])
@@ -747,6 +748,8 @@ def run_project(project, data):
             state.update(status='preparing_assets',error='');write_json(state_path,state)
             log('Reusing the completed AI plan; no new analysis request')
             finish_preparation(project,saved,state)
+            if state.get('scene_mode')=='custom':
+                import custom_scenes; custom_scenes.run(project,data,state,saved)
             return
         state.pop('plan_inputs',None);state.pop('plan_hash',None)
         state.update(status='analyzing',error='');write_json(state_path,state)
@@ -832,8 +835,24 @@ def run_project(project, data):
                      metadata=metadata,sampled=sampled,plan_inputs=inputs,plan_hash=fingerprint(plan),error='')
         write_json(state_path,state)
         finish_preparation(project,plan,state)
+        if state.get('scene_mode')=='custom':
+            import custom_scenes; custom_scenes.run(project,data,state,plan)
     except Exception as error:
         state.update(status='failed',error=str(error) if isinstance(error,ValueError) else 'Reference analysis failed. Check the job log and retry.')
+        write_json(state_path,state)
+        raise
+
+def draw_scenes(project, data):
+    """Have Claude draw (or redraw) every scene from the saved plan, without a new analysis."""
+    import custom_scenes
+    project=Path(project).resolve();state_path=project/'reference_style.json';state=read_cache(state_path)
+    plan=read_cache(project/'reference/plan.json')
+    if not plan.get('scenes') or fingerprint(plan)!=state.get('plan_hash'): raise ValueError('Analyze & plan scenes first.')
+    try:
+        if not state.get('resolved_assets'): finish_preparation(project,plan,state)
+        custom_scenes.run(project,data,state,plan)
+    except Exception as error:
+        state.update(status='failed',error=str(error) if isinstance(error,ValueError) else 'Drawing scenes failed. Check the job log and retry.')
         write_json(state_path,state)
         raise
 
@@ -846,7 +865,8 @@ def media_reference(project, relative):
 if __name__=='__main__':
     if hasattr(sys.stdout,'reconfigure'): sys.stdout.reconfigure(encoding='utf-8',errors='replace')
     parser=argparse.ArgumentParser();parser.add_argument('--project',type=Path,required=True);parser.add_argument('--data',type=Path,default=ENGINE/'output')
+    parser.add_argument('--scenes-only',action='store_true',help='Redraw scenes with Claude from the saved scene plan')
     args=parser.parse_args()
-    try: run_project(args.project,args.data)
+    try: draw_scenes(args.project,args.data) if args.scenes_only else run_project(args.project,args.data)
     except Exception as error:
         log(str(error));sys.exit(1)

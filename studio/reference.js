@@ -85,6 +85,14 @@
    $('reference-library-summary').textContent=(library.length>1?'Saved styles: ':'Saved style: ')+library.map((row,i)=>(library.length>1?'ABC'[i]+' · ':'')+row.name).join(' + ')+(parts?'. '+parts:'.');
   }
   $('reference-save-style').hidden=!ref.analysis || ref.workflow==='flow';
+  const custom=ref.scene_mode==='custom',drawn=ref.custom_scenes;
+  $('reference-scenes-box').hidden=ref.workflow==='flow' || Boolean(recreating);
+  if(document.activeElement!==$('reference-scene-mode-panel'))$('reference-scene-mode-panel').value=custom?'custom':'templates';
+  $('reference-draw').hidden=!custom || !ref.analysis;
+  $('reference-draw').textContent=drawn?'Draw scenes again with Claude':'Draw scenes with Claude';
+  const total=(drawn?.passed?.length || 0)+(drawn?.failed?.length || 0);
+  $('reference-scenes-status').textContent=!custom?'Scenes use the built-in templates.':!drawn?(ref.analysis?'Click Draw scenes with Claude, or Analyze & plan scenes to plan and draw in one step.':'Analyze & plan scenes will also have Claude draw every scene.'):
+   'Claude drew '+drawn.passed.length+' of '+total+' scenes'+(drawn.model?' ('+modelName(drawn.model)+')':'')+'.'+(drawn.failed?.length?' '+drawn.failed.join(', ')+' use templates because the version Claude drew did not pass the checks.':'');
   const player=$('reference-player');player.hidden=!ref.reference_file;
   if(ref.sampled)player.poster=app.mediaUrl('reference/frames/frame-0001.jpg',project.id);
   if(ref.reference_file){const src=app.mediaUrl(ref.reference_file,project.id);if(player.getAttribute('src')!==src)player.src=src;}
@@ -152,7 +160,7 @@
   return provider;
  }
  async function open(){
-  $('reference-form').reset();window.VideoTurboVoice?.sync();window.VideoTurboStyles?.openCreation();window.VideoTurboFlow?.syncCreation();window.VideoTurboRecreate?.syncCreation();message('reference-create-error','');$('reference-dialog').showModal();$('reference-name').focus();
+  $('reference-form').reset();window.VideoTurboVoice?.sync();window.VideoTurboStyles?.openCreation();window.VideoTurboFlow?.syncCreation();window.VideoTurboRecreate?.syncCreation();syncSceneMode();message('reference-create-error','');$('reference-dialog').showModal();$('reference-name').focus();
   try{
    connectionSettings=await app.api('/api/reference/settings');
    $('reference-create-provider').value=$('reference-provider').value || connectionSettings.provider || 'codex';
@@ -166,6 +174,19 @@
   const result=await app.api('/api/reference/start',{id:app.getState().project.id,build,provider:$('reference-provider').value});
   app.getState().job=result.job;app.install(result.project);app.showJob();
  }
+ function syncSceneMode(){
+  const animation=$('reference-workflow').value==='reference',custom=animation && $('reference-scene-mode').value==='custom';
+  $('reference-scene-mode-field').hidden=!animation;$('reference-scene-mode-note').hidden=!custom;
+ }
+ $('reference-workflow').addEventListener('change',syncSceneMode);
+ $('reference-scene-mode').onchange=()=>{
+  syncSceneMode();
+  if($('reference-scene-mode').value==='custom' && $('reference-create-provider').value!=='claude'){
+   creationDrafts[creationProvider]={model:modelValue('reference-create-model')};
+   $('reference-create-provider').value='claude';fillCreationConnection();
+   app.toast('Claude is now the AI provider, since it draws the scenes.');
+  }
+ };
  $('reference-new').onclick=open;
  $('reference-close').onclick=()=>$('reference-dialog').close();
  $('reference-form').onsubmit=e=>{e.preventDefault();action(async()=>{
@@ -178,7 +199,7 @@
   if(files.some(([,f])=>!f || f.size>4*1024**3))throw new Error('Choose supported media files up to 4 GB each.');
   if(app.getState().dirty)await app.save();
   const provider=await applyCreationProvider();
-  const project=await app.api('/api/reference/create',{provider,voice_source:$('reference-voice-source').value,name:$('reference-name').value,script:drafting?'':$('reference-script').value,...flow,instructions:$('reference-instructions').value,styles:library.styles,style_mix:library.mix,...(recreating?{recreate:recreating.options}:{})});
+  const project=await app.api('/api/reference/create',{provider,voice_source:$('reference-voice-source').value,name:$('reference-name').value,script:drafting?'':$('reference-script').value,...flow,instructions:$('reference-instructions').value,styles:library.styles,style_mix:library.mix,...(recreating?{recreate:recreating.options}:{}),scene_mode:flow.workflow==='reference'?$('reference-scene-mode').value:'templates'});
   app.install(project);$('reference-dialog').close();await app.refreshState();
   for(const [role,file] of files){app.toast('Uploading '+file.name+'...');await upload(file,role);}
   if(recreating){
@@ -195,6 +216,7 @@
   await connection();app.toast(flow.workflow==='flow'?'Flow project ready. Analyze the reference to prepare your script or storyboard.':recreating?'Project ready. Click Analyze source & draft script.':library.styles.length?'Project ready. Click Analyze & plan scenes to apply your saved styles.':'Reference project ready. Analyze the style to prepare your new scenes.');
  },'reference-create-error');};
  $('reference-create-provider').onchange=()=>{
+  if($('reference-create-provider').value!=='claude' && $('reference-scene-mode').value==='custom'){$('reference-scene-mode').value='templates';syncSceneMode();}
   creationDrafts[creationProvider]={model:modelValue('reference-create-model')};
   fillCreationConnection();
  };
@@ -216,6 +238,16 @@
  $('reference-model-refresh').onclick=()=>loadModels('reference-model',$('reference-provider').value,modelValue('reference-model'),true);
  $('reference-replace').onchange=()=>action(async()=>{const f=$('reference-replace').files[0];if(f)await upload(f,'reference');$('reference-replace').value='';});
  $('reference-plan').onclick=()=>action(()=>start(false));
+ $('reference-scene-mode-panel').onchange=()=>action(async()=>{
+  const p=app.getState().project;if(app.getState().dirty)await app.save();
+  app.install(await app.api('/api/reference/scene-mode',{id:p.id,mode:$('reference-scene-mode-panel').value}));
+ });
+ $('reference-draw').onclick=()=>action(async()=>{
+  if(app.getState().dirty)await app.save();
+  const result=await app.api('/api/reference/draw-scenes',{id:app.getState().project.id});
+  app.getState().job=result.job;app.install(result.project);app.showJob();
+  app.toast('Claude is drawing your scenes. This takes several minutes.');
+ });
  $('reference-save-style').onclick=()=>action(async()=>{
   const result=await app.api('/api/styles/from-project',{id:app.getState().project.id});
   window.VideoTurboStyles?.refresh(result);
@@ -246,6 +278,7 @@
    $('reference-model-refresh').disabled=working || busy || Boolean(modelStates['reference-model']?.loading);
    for(const id of ['reference-save-connection','reference-check-connection'])$(id).disabled=working || busy || !modelStates['reference-model']?.ready;
    $('reference-save-style').disabled=working || busy;
+   for(const id of ['reference-scene-mode-panel','reference-draw'])$(id).disabled=working || busy;
    const p=app.getState().project,r=p?.reference_style,ready=Boolean((r?.reference_file || r?.library_styles?.length) && ((r.workflow==='flow' && r.idea && !p?.editor?.script?.trim()) || (window.VideoTurboRecreate?.drafting(p) && window.VideoTurboRecreate?.hasSource(p)) || ((p?.voiceover || window.VideoTurboVoice?.canGenerate()) && p?.editor?.script?.trim())));
    for(const id of ['reference-plan','reference-build'])$(id).disabled=working || busy || !ready || !modelStates['reference-model']?.ready;
    if(r && Object.keys(r).length && (r.stale || !['ready','complete','render_failed'].includes(r.status))){$('build').disabled=true;$('render-preview').disabled=true;}

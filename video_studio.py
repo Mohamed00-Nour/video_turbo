@@ -303,8 +303,11 @@ class Studio:
             self.enqueue(job, self.run, path, read_cache(path / 'config.json'), 0)
             return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
 
-    def create_reference(self, name, script, instructions='', provider=None, workflow='reference', idea='', styles=None, style_mix=None, source=None):
+    def create_reference(self, name, script, instructions='', provider=None, workflow='reference', idea='', styles=None, style_mix=None, source=None, scene_mode='templates'):
         self.idle()
+        if scene_mode not in ('templates', 'custom'): raise ValueError('Choose built-in templates or Claude draws each scene.')
+        if scene_mode == 'custom' and (workflow != 'reference' or (provider or reference_styles.settings(self.data).get('provider')) != 'claude'):
+            raise ValueError('Claude draws each scene with Video Turbo animation and the Claude provider.')
         if workflow not in ('reference', 'flow'): raise ValueError('Choose a supported creation path.')
         if source is not None:
             # Recreate a source video's idea: the script is drafted later, for review.
@@ -331,6 +334,7 @@ class Studio:
         state = {'status': 'awaiting_inputs', 'reference_file': '', 'instructions': instructions, 'analysis_provider': provider, 'workflow': workflow, 'idea': idea.strip(), 'error': ''}
         if library: state.update(library_styles=library, style_mix=style_mix)
         if source is not None: state['recreate'] = source
+        if scene_mode == 'custom': state['scene_mode'] = 'custom'
         write_json(self.project(identifier) / 'reference_style.json', state)
         return self.load(identifier)
 
@@ -436,6 +440,39 @@ class Studio:
                 workflow.update(status='rendering', error='')
                 write_json(path / 'ai_workflow.json', workflow)
             self.enqueue(job, self.run, path, config, 0)
+            return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
+
+    def set_scene_mode(self, identifier, mode):
+        with self.lock:
+            self.idle(identifier)
+            path = self.project(identifier)
+            state = read_cache(path / 'reference_style.json')
+            if not state or state.get('workflow') == 'flow': raise ValueError('Scene drawing works with Video Turbo animation projects.')
+            if mode not in ('templates', 'custom'): raise ValueError('Choose built-in templates or Claude draws each scene.')
+            if mode == 'custom' and state.get('analysis_provider') != 'claude': raise ValueError('Choose Claude as the analysis provider first.')
+            state['scene_mode'] = mode
+            if mode == 'templates':
+                # Keep Claude's files on disk, but render the built-in templates.
+                config = read_cache(path / 'config.json')
+                for row in config.get('sections', []): row.pop('custom_scene', None); row.pop('custom_images', None)
+                write_json(path / 'config.json', config)
+                editor = read_cache(path / 'studio.json'); editor['sections'] = config.get('sections', []); write_json(path / 'studio.json', editor)
+                state.pop('custom_scenes', None)
+            write_json(path / 'reference_style.json', state)
+            return self.load(identifier)
+
+    def draw_scenes(self, identifier):
+        """Have Claude draw each scene from the saved plan, without a new analysis."""
+        with self.lock:
+            self.idle(identifier)
+            path = self.project(identifier)
+            state = self.reference_state(identifier)
+            if state.get('scene_mode') != 'custom': raise ValueError('Choose "Claude draws each scene" first.')
+            if not state.get('analysis') or state.get('stale') or state.get('status') not in ('ready', 'complete', 'render_failed', 'failed'):
+                raise ValueError('Analyze & plan scenes first.')
+            if not reference_styles.settings(self.data)['providers']['claude']['installed']: raise ValueError('Connect Claude first.')
+            job = self._ai_job(identifier, 'reference_scenes', 'Claude is drawing your scenes')
+            self.enqueue(job, self.run, path, read_cache(path / 'config.json'), 0)
             return {'project': self.load(identifier), 'job': copy.deepcopy(job)}
 
     def start_reference(self, identifier, build=True, provider=None):
@@ -994,7 +1031,8 @@ class Studio:
             if job.get('force_voice'): command.append('--force')
             commands.append(command)
         if action.startswith('reference_'):
-            commands.append([sys.executable, '-u', str(ENGINE / 'reference_styles.py'), '--project', str(path), '--data', str(self.data)])
+            commands.append([sys.executable, '-u', str(ENGINE / 'reference_styles.py'), '--project', str(path), '--data', str(self.data),
+                             *(['--scenes-only'] if action == 'reference_scenes' else [])])
         if action and not action.startswith('reference_') and 'sections' not in config and (path / 'games.txt').is_file() and (path / 'games.txt').read_text('utf-8').strip():
             command = [sys.executable, '-u', str(ENGINE / 'prepare_assets.py'), '--project', str(path)]
             if action == 'ai_prepare': command += ['--without-voiceover']
@@ -1002,7 +1040,7 @@ class Studio:
         command = [sys.executable, '-u', str(ENGINE / 'build_video.py'), '--project', str(path), '--no-preview']
         if action == 'preview':
             command += ['--preview-only', '--preview-at', str(at)]
-        if action and action not in ('ai_prepare', 'reference_plan') and not action.startswith('pc_'): commands.append(command)
+        if action and action not in ('ai_prepare', 'reference_plan', 'reference_scenes') and not action.startswith('pc_'): commands.append(command)
         try:
             for command in commands:
                 with self.lock:
@@ -1064,7 +1102,7 @@ class Studio:
                 if reference and action:
                     if job['status'] == 'complete':
                         if action == 'reference_plan' and (reference.get('workflow') == 'flow' or reference.get('status') == 'script_review'): reference['error'] = ''
-                        else: reference.update(status='ready' if action in ('reference_plan','preview') else 'complete', error='')
+                        else: reference.update(status='ready' if action in ('reference_plan','reference_scenes','preview') else 'complete', error='')
                     else:
                         reference.update(status='render_failed' if action in ('build','preview') and reference.get('analysis') else job['status'], error=reference.get('error') or job.get('error',''))
                     write_json(path / 'reference_style.json', reference)
@@ -1155,7 +1193,7 @@ class Handler(BaseHTTPRequestHandler):
             if host not in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'):
                 self.json_response({'error': 'Use the localhost address.'}, 403); return
             if parsed.path == '/api/health':
-                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series', 'parallel-publishing', 'analytics', 'reference-styles', 'reference-codex', 'reference-models', 'elevenlabs-voice', 'google-flow-handoff', 'flow-portable-prompts', 'pc-tips', 'pc-chatgpt-sign-in', 'pc-auto-ideas', 'pc-visual-modes', 'pc-problem-first', 'pc-google-first', 'antigravity-brief-automation', 'antigravity-new-episodes', 'parallel-production', 'style-library', 'reference-claude', 'recreate-video']})
+                self.json_response({'app': 'video-turbo-studio', 'engine': str(ENGINE), 'features': ['ai-series', 'parallel-publishing', 'analytics', 'reference-styles', 'reference-codex', 'reference-models', 'elevenlabs-voice', 'google-flow-handoff', 'flow-portable-prompts', 'pc-tips', 'pc-chatgpt-sign-in', 'pc-auto-ideas', 'pc-visual-modes', 'pc-problem-first', 'pc-google-first', 'antigravity-brief-automation', 'antigravity-new-episodes', 'parallel-production', 'style-library', 'reference-claude', 'recreate-video', 'claude-scenes']})
             elif parsed.path == '/api/state':
                 with self.studio.lock:
                     self.json_response({'token': self.studio.token, 'projects': self.studio.list_projects(),
@@ -1391,7 +1429,7 @@ class Handler(BaseHTTPRequestHandler):
                     result = self.studio.start_voice(data['id'], data.get('build', False) is True, data.get('force', False) is True)
                 elif parsed.path == '/api/reference/create':
                     result = self.studio.create_reference(data['name'], data['script'], data.get('instructions', ''), data.get('provider'), data.get('workflow', 'reference'), data.get('idea', ''),
-                                                          data.get('styles') or None, data.get('style_mix'), data.get('recreate'))
+                                                          data.get('styles') or None, data.get('style_mix'), data.get('recreate'), data.get('scene_mode', 'templates'))
                 elif parsed.path == '/api/styles/create':
                     style = style_library.create(self.studio.data, data.get('name', ''), data.get('provider', 'antigravity'), data.get('model'))
                     result = {**self.studio.list_styles(), 'style': style}
@@ -1418,6 +1456,10 @@ class Handler(BaseHTTPRequestHandler):
                     path = self.studio.project(data['id'])
                     flow_workflow.assign_clip(path, data['scene'], data['file'], data.get('offset_seconds', 0), data.get('plan_hash', ''))
                     result = self.studio.load(data['id'])
+                elif parsed.path == '/api/reference/scene-mode':
+                    result = self.studio.set_scene_mode(data['id'], data.get('mode'))
+                elif parsed.path == '/api/reference/draw-scenes':
+                    result = self.studio.draw_scenes(data['id'])
                 elif parsed.path == '/api/reference/start':
                     result = self.studio.start_reference(data['id'], data.get('build', True) is True, data.get('provider'))
                 elif parsed.path == '/api/reference/settings':
@@ -1524,7 +1566,7 @@ def running_studio(url, require_series=False, require_parallel=False, require_an
                 and isinstance(data.get('engine'), str) and Path(data['engine']).resolve() == ENGINE
                 and (not require_pc or all(flag in data.get('features', []) for flag in ('pc-tips', 'pc-chatgpt-sign-in', 'pc-auto-ideas', 'pc-visual-modes', 'pc-problem-first', 'pc-google-first')))
                 and (not require_brief or all(flag in data.get('features', []) for flag in ('antigravity-brief-automation', 'antigravity-new-episodes', 'parallel-production')))
-                and (not require_styles or all(flag in data.get('features', []) for flag in ('style-library', 'reference-claude', 'recreate-video')))
+                and (not require_styles or all(flag in data.get('features', []) for flag in ('style-library', 'reference-claude', 'recreate-video', 'claude-scenes')))
                 and (not require_series or 'ai-series' in data.get('features', []))
                 and (not require_parallel or 'parallel-publishing' in data.get('features', []))
                 and (not require_analytics or 'analytics' in data.get('features', []))

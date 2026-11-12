@@ -2,6 +2,7 @@ import React from 'react';
 import {Easing, interpolate, Sequence, useCurrentFrame, useVideoConfig} from 'remotion';
 import {DirectedReferenceScene} from './DirectedReferenceScene';
 import {scenePalette} from './visualStyle';
+import {CustomSceneFrame, hasCustomScene} from '../custom/CustomScene';
 
 // Overlap after the boundary: narration and caption timestamps never move.
 export const handoffFrames = (previous:any, next:any, fps:number) => Math.max(0,
@@ -22,7 +23,7 @@ const SceneLayer: React.FC<{block:any; incoming:number; outgoing:number}> = ({bl
     background:scenePalette(block.referenceStyle,block).background,
     opacity:wipe?1:enter,clipPath:wipe?`inset(0 0 0 ${(1-enter)*100}%)`:undefined}}>
     <div style={{position:'absolute',inset:0,transform:`translateY(${drift}px) scale(${1+(1-enter)*.025+exit*.012})`}}>
-      <DirectedReferenceScene block={block} visibility={contentEnter*(1-contentExit)}/>
+      {hasCustomScene(block) ? <CustomSceneFrame block={block}/> : <DirectedReferenceScene block={block} visibility={contentEnter*(1-contentExit)}/>}
     </div>
   </div>;
 };

@@ -90,3 +90,8 @@
 .recreate-points{display:grid;gap:8px;padding-left:22px;line-height:1.6}
 .recreate-points span{display:block;color:var(--muted);font-size:14px}
 #recreate-review textarea{line-height:1.7}
+
+/* Claude draws each scene */
+.reference-scenes-box{border:1px solid var(--line);border-radius:18px;padding:4px 16px 14px;margin:14px 0}
+.reference-scenes-box .field{margin-bottom:6px}
+#reference-scenes-status{margin:4px 0 10px;line-height:1.6}

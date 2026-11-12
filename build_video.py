@@ -967,6 +967,9 @@ def sync_public_assets() -> dict:
             for field in ("media", "secondary_media"):
                 if section.get(field):
                     publish(video_sections.media_path(PROJECT_PATH, section[field]), video_sections.public_media(section[field]))
+            for relative in section.get("custom_images", {}).values():
+                if video_sections.public_media(relative) not in sources:
+                    publish(video_sections.media_path(PROJECT_PATH, relative), video_sections.public_media(relative))
     if config.get("reference_style") or any(row.get("layout") == "flow_clip" for row in config.get("sections", [])):
         for name in ("ibm-plex-sans-arabic-700.woff2", "Amiri-Bold.ttf"):
             publish(ENGINE_DIR / "studio/ui-fonts" / name, "reference-fonts/" + name)
@@ -1006,6 +1009,7 @@ def render_cache_key(timeline: dict, assets: dict) -> str:
     dependencies = [Path(__file__), ENGINE_DIR / "pipeline_common.py", ENGINE_DIR / "video_sections.py", CODE_DIR / "package-lock.json", CODE_DIR / "package.json"]
     dependencies += sorted(path for path in (CODE_DIR / "src").rglob("*")
                            if path.suffix in {".ts", ".tsx", ".css"})
+    dependencies += sorted((PROJECT_PATH / "custom-scenes").glob("scene-*.tsx"))  # Scenes Claude wrote for this project
     return fingerprint({"version": 1, "timeline": timeline, "assets": assets,
                         "code": {str(path.resolve()): file_digest(path) for path in dependencies if path.is_file()}})
 
@@ -1038,6 +1042,8 @@ def renderer_entry() -> Path:
     shutil.copytree(CODE_DIR / "src", target, dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("timeline.json"))
     write_json(target / "timeline.json", read_cache(OUTPUT_DIR / "timeline.json"))
+    import custom_scenes
+    custom_scenes.install(PROJECT_PATH, target / "custom")
     return target / "index.ts"
 
 
