@@ -59,10 +59,13 @@ class ReferenceImageTests(unittest.TestCase):
                 logo_assets.fetch_reference_image(self.url,Path(folder)/'image.png')
             image.load.assert_not_called()
 
-    def test_asset_failure_names_the_asset_and_removes_pending_file(self):
-        with tempfile.TemporaryDirectory() as folder,patch.object(logo_assets,'fetch_reference_image',side_effect=ValueError('Reference image exceeds 12 MB.')):
-            with self.assertRaisesRegex(ValueError,'Asset portrait: Reference'):
-                ref.prepare_assets(Path(folder),{'assets':[{'id':'portrait','kind':'image','source':self.url}]})
+    def test_asset_failure_is_skipped_by_name_and_removes_pending_file(self):
+        # A broken image link must not stop the video; its scene falls back to typography.
+        with tempfile.TemporaryDirectory() as folder,patch.object(logo_assets,'fetch_reference_image',side_effect=ValueError('Reference image exceeds 12 MB.')),\
+             patch.object(ref,'log') as log:
+            resolved=ref.prepare_assets(Path(folder),{'assets':[{'id':'portrait','kind':'image','source':self.url}]})
+            self.assertEqual(resolved,{})
+            self.assertTrue(any('Skipped image portrait' in call.args[0] and '12 MB' in call.args[0] for call in log.call_args_list))
             self.assertEqual(list((Path(folder)/'media/reference').glob('*.pending.png')),[])
 
 
